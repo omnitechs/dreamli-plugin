@@ -206,9 +206,29 @@ final class DS_Material_Options {
                     // The JSON (class-editor-ui.php) has already set 'fixed' (as 'qt') and 'percent' prices.
                     // We ONLY need to run this PHP logic for 'inherit' types.
                     
-                    if ($type === 'fixed' || $type === 'percent') {
-                        // The JSON has already set the correct type and price.
-                        // We do nothing and trust the JSON.
+                    if ($type === 'fixed') {
+                        // The JSON has already set the correct type and price for fixed (qt) with share split.
+                        // Trust JSON and skip.
+                        continue;
+                    }
+
+                    if ($type === 'percent') {
+                        // Percent rules must also be affected by the part's weight share.
+                        $base_value = (float)($r['value'] ?? 0); // e.g., 10 for 10%
+                        $share_multiplier = $part_share_pct / 100.0; // e.g., 0.6 for 60%
+                        $final_percent = round($base_value * $share_multiplier, 4); // e.g., 6.0000
+
+                        // Apply/update on the choice
+                        $ch['pricing_type']   = 'percent';
+                        $ch['pricing_amount'] = $final_percent;
+                        if (isset($ch['pricing']) && is_array($ch['pricing'])) {
+                            $ch['pricing']['amount'] = $final_percent;
+                            $ch['pricing']['type']   = 'percent';
+                        } else {
+                            $ch['pricing'] = ['enabled'=>true,'amount'=>$final_percent,'type'=>'percent'];
+                        }
+
+                        $changed++;
                         continue;
                     }
                     

@@ -110,11 +110,11 @@ final class DS_Editor_UI {
                 $final_pricing_amount = round($split_price, 2);
 
             } else if ($type === 'percent') {
-                // این قانون درصد است.
-                // ما نوع را 'percent' می‌گذاریم و مقدار را خود درصد (مثلاً 10 برای 10%)
-                // ما فرض می‌کنیم که قوانین 'percent' نباید 'extra' داشته باشند
+                // قانون درصد: باید تحت تاثیر سهم وزن هر بخش نیز باشد.
+                // بنابراین مقدار درصد نهایی = درصد پایه * سهم بخش (share_multiplier)
+                // مثال: 10% با سهم 60% => 6%
                 $final_pricing_type = 'percent';
-                $final_pricing_amount = $base_value; // مقدار درصد، مثلا 10
+                $final_pricing_amount = round($base_value * $share_multiplier, 4);
             
             }
             // برای 'inherit' یا 'none':
