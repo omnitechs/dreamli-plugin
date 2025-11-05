@@ -27,6 +27,7 @@ require_once DS_PLUGIN_DIR . 'inc/class-editor-ui.php';
 require_once DS_PLUGIN_DIR . 'inc/class-pricing.php';
 require_once DS_PLUGIN_DIR . 'inc/class-material-options.php';
 require_once DS_PLUGIN_DIR . 'inc/class-ai-product-seo.php';
+require_once DS_PLUGIN_DIR . 'inc/class-ads.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -39,6 +40,10 @@ register_activation_hook(__FILE__, function () {
     if (class_exists('DS_AI_Product_SEO') && method_exists('DS_AI_Product_SEO', 'install')) {
         DS_AI_Product_SEO::install();
     }
+	// Create Ads table (CPC campaigns)
+	if (class_exists('DS_Ads') && method_exists('DS_Ads', 'install')) {
+		DS_Ads::install();
+	}
 });
 
 add_action('plugins_loaded', function () {
@@ -55,5 +60,10 @@ add_action('plugins_loaded', function () {
 	DS_Pricing::init();
 	DS_Material_Options::init();
 	DS_AI_Product_SEO::init();
+	DS_Ads::init();
+	// Ensure Ads table exists on updates (without reactivation)
+	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
+		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }
+	}
 
 });

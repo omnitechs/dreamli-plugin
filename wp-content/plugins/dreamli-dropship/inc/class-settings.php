@@ -29,6 +29,10 @@ final class DS_Settings {
             'posts_pending'    => 1,
             'products_pending' => 1,
 
+            // --- Ads (CPC)
+            'ads_cpc_home'     => 0.10,
+            'ads_cpc_category' => 0.10,
+
             // --- Curated credit
             'curated_credit_enable' => 1,
             'curated_credit_amount' => 2.00,

@@ -46,6 +46,9 @@ final class DS_Admin_Menus {
                 // Wallet
                 'withdraw_min',
 
+                // Ads CPC
+                'ads_cpc_home','ads_cpc_category',
+
                 // Product Options integration
                 'po_meta_key','po_type_field_main_id','po_type_field_secondary_id',
 
@@ -144,6 +147,11 @@ final class DS_Admin_Menus {
 
             <h2 style="margin-top:24px;">Wallet / Payouts</h2>
             <p>Minimum withdrawal (€): <input type="number" step="0.01" name="withdraw_min" value="<?php echo esc_attr($s['withdraw_min']); ?>"></p>
+
+            <h2 style="margin-top:24px;">Promoted Products (CPC)</h2>
+            <p>Cost per click – Home (€): <input type="number" step="0.01" name="ads_cpc_home" value="<?php echo esc_attr($s['ads_cpc_home']); ?>">
+               | Category (€): <input type="number" step="0.01" name="ads_cpc_category" value="<?php echo esc_attr($s['ads_cpc_category']); ?>">
+            </p>
 
             <h2 style="margin-top:24px;">Product Options Integration</h2>
             <p>Meta key (JSON fields): <input type="text" name="po_meta_key" value="<?php echo esc_attr($s['po_meta_key']); ?>" placeholder="_wapf_field ..."> <small>خالی = کشف خودکار</small></p>
