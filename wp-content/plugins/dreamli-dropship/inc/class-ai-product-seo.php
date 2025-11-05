@@ -26,6 +26,21 @@ final class DS_AI_Product_SEO {
     const OPT_RELATED_LIMIT     = 'ds_ai_related_limit';       // چند محصول از کتگوری بخوانیم
     const OPT_CONTEXT_MAX_BYTES = 'ds_ai_context_max_bytes';   // سقف بایت JSON که به مدل می‌دهیم
 
+    // Runner selection
+    const OPT_RUNNER            = 'ds_ai_runner';  // 'as' (Action Scheduler) or 'direct' (Direct + WP-Cron)
+
+    // Responses API specific
+    const OPT_PROMPT_ID         = 'ds_ai_prompt_id';
+    const OPT_PROMPT_VERSION    = 'ds_ai_prompt_version';
+    const OPT_VECTOR_STORE_IDS  = 'ds_ai_vector_store_ids';    // CSV of vector_store_ids
+    const OPT_ENABLE_WEB_SEARCH = 'ds_ai_enable_web_search';   // yes/no
+    const OPT_SEARCH_CONTEXT    = 'ds_ai_search_context_size'; // small|medium|large
+    const OPT_STORE_RESP        = 'ds_ai_store_response';      // yes/no
+    const OPT_INCLUDE_FIELDS    = 'ds_ai_include_fields';      // CSV list of include fields
+
+    // Pricing
+    const OPT_GPT5_PRICE_EUR    = 'ds_ai_gpt5_price_eur';
+
     // ===== Ajax / hooks
     const NONCE        = 'ds_ai_nonce';
     const AJAX_ACTION  = 'ds_ai_product_ai';
@@ -98,11 +113,39 @@ final class DS_AI_Product_SEO {
         register_setting('ds_ai_generator', self::OPT_CONTEXT_MAX_BYTES, [
             'type'=>'integer','sanitize_callback'=>'absint','default'=>24000
         ]);
+
+        // Responses API settings
+        register_setting('ds_ai_generator', self::OPT_PROMPT_ID, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>''
+        ]);
+        register_setting('ds_ai_generator', self::OPT_PROMPT_VERSION, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'4'
+        ]);
+        register_setting('ds_ai_generator', self::OPT_VECTOR_STORE_IDS, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>''
+        ]);
+        register_setting('ds_ai_generator', self::OPT_ENABLE_WEB_SEARCH, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'yes'
+        ]);
+        register_setting('ds_ai_generator', self::OPT_SEARCH_CONTEXT, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'medium'
+        ]);
+        register_setting('ds_ai_generator', self::OPT_STORE_RESP, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'yes'
+        ]);
+        register_setting('ds_ai_generator', self::OPT_INCLUDE_FIELDS, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'reasoning.encrypted_content,web_search_call.action.sources'
+        ]);
+        register_setting('ds_ai_generator', self::OPT_GPT5_PRICE_EUR, [
+            'type'=>'number','sanitize_callback'=>'floatval','default'=>0.00
+        ]);
+        // Runner selection (default to Action Scheduler)
+        register_setting('ds_ai_generator', self::OPT_RUNNER, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'as'
+        ]);
     }
     public static function render_settings(){
         if (!current_user_can('manage_options')) return;
-        $allowed = array_filter(array_map('trim', explode(',', get_option(self::OPT_ALLOWED_MODELS, 'gpt-5,gpt-4o,gpt-4o-mini'))));
-        $default = get_option(self::OPT_DEFAULT_MODEL, 'gpt-5');
         ?>
         <div class="wrap">
             <h1>DS AI Product Generator</h1>
@@ -115,14 +158,9 @@ final class DS_AI_Product_SEO {
                             <input type="password" name="<?php echo esc_attr(self::OPT_API_KEY); ?>" value="<?php echo esc_attr(get_option(self::OPT_API_KEY,'')); ?>" style="width:420px" placeholder="sk-..." />
                             <p class="description">Alternatively define <code>OPENAI_API_KEY</code> in wp-config.php.</p>
                         </td></tr>
-                    <tr><th>Allowed Models (CSV)</th>
-                        <td><input type="text" name="<?php echo esc_attr(self::OPT_ALLOWED_MODELS); ?>" value="<?php echo esc_attr(get_option(self::OPT_ALLOWED_MODELS)); ?>" style="width:420px" /></td></tr>
-                    <tr><th>Default Model</th>
-                        <td><select name="<?php echo esc_attr(self::OPT_DEFAULT_MODEL); ?>">
-                            <?php foreach($allowed as $m): ?>
-                                <option value="<?php echo esc_attr($m); ?>" <?php selected($default, $m); ?>><?php echo esc_html($m); ?></option>
-                            <?php endforeach; ?>
-                        </select></td></tr>
+                    <tr><th>GPT‑5 price per request (EUR)</th>
+                        <td><input type="number" name="<?php echo esc_attr(self::OPT_GPT5_PRICE_EUR); ?>" value="<?php echo esc_attr(get_option(self::OPT_GPT5_PRICE_EUR, 0)); ?>" step="0.01" min="0" style="width:140px" />
+                            <p class="description">This amount will be charged to the product author's wallet for each AI generation request.</p></td></tr>
                     <tr><th>System Prompt</th>
                         <td><textarea name="<?php echo esc_attr(self::OPT_SYSTEM_PROMPT); ?>" rows="4" style="width:100%;max-width:800px"><?php echo esc_textarea(get_option(self::OPT_SYSTEM_PROMPT)); ?></textarea></td></tr>
                     <tr><th>Generation Instructions</th>
@@ -135,6 +173,41 @@ final class DS_AI_Product_SEO {
                         <td><input type="number" min="1000" max="200000" step="1000" name="<?php echo esc_attr(self::OPT_CONTEXT_MAX_BYTES); ?>"
                                    value="<?php echo (int) get_option(self::OPT_CONTEXT_MAX_BYTES, 24000); ?>" />
                             <p class="description">We will trim the RELATED PRODUCTS JSON to stay under this byte budget before sending to the model.</p></td></tr>
+
+                    <tr><th colspan="2"><h2 style="margin-top:20px">Responses API</h2></th></tr>
+                    <tr><th>Prompt ID</th>
+                        <td><input type="text" name="<?php echo esc_attr(self::OPT_PROMPT_ID); ?>" value="<?php echo esc_attr(get_option(self::OPT_PROMPT_ID,'')); ?>" style="width:420px" placeholder="pmpt_..." />
+                            <p class="description">If set, we will call <code>/v1/responses</code> with this Prompt. If empty, we will still call <code>/v1/responses</code> but use GPT‑5.</p>
+                        </td></tr>
+                    <tr><th>Prompt Version</th>
+                        <td><input type="text" name="<?php echo esc_attr(self::OPT_PROMPT_VERSION); ?>" value="<?php echo esc_attr(get_option(self::OPT_PROMPT_VERSION,'3')); ?>" style="width:120px" /></td></tr>
+                    <tr><th>Vector Store IDs (CSV)</th>
+                        <td><input type="text" name="<?php echo esc_attr(self::OPT_VECTOR_STORE_IDS); ?>" value="<?php echo esc_attr(get_option(self::OPT_VECTOR_STORE_IDS,'')); ?>" style="width:100%;max-width:800px" placeholder="vs_xxx,vs_yyy" /></td></tr>
+                    <tr><th>Enable Web Search</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPT_ENABLE_WEB_SEARCH); ?>" value="yes" <?php checked(get_option(self::OPT_ENABLE_WEB_SEARCH,'yes'),'yes'); ?>/> Allow web_search tool</label></td></tr>
+                    <tr><th>Web Search Context Size</th>
+                        <td><select name="<?php echo esc_attr(self::OPT_SEARCH_CONTEXT); ?>">
+                            <?php foreach(['small','medium','large'] as $sz): ?>
+                                <option value="<?php echo esc_attr($sz); ?>" <?php selected(get_option(self::OPT_SEARCH_CONTEXT,'medium'),$sz); ?>><?php echo esc_html(ucfirst($sz)); ?></option>
+                            <?php endforeach; ?>
+                        </select></td></tr>
+                    <tr><th>Store Responses</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPT_STORE_RESP); ?>" value="yes" <?php checked(get_option(self::OPT_STORE_RESP,'yes'),'yes'); ?>/> Store responses on OpenAI</label></td></tr>
+                    <tr><th>Include fields (CSV)</th>
+                    <td><input type="text" name="<?php echo esc_attr(self::OPT_INCLUDE_FIELDS); ?>" value="<?php echo esc_attr(get_option(self::OPT_INCLUDE_FIELDS,'reasoning.encrypted_content,web_search_call.action.sources')); ?>" style="width:100%;max-width:800px" />
+                        <p class="description">Fields to include from the response object.</p></td></tr>
+
+                    <tr><th colspan="2"><h2 style="margin-top:20px">Background Runner</h2></th></tr>
+                    <tr><th>Runner</th>
+                        <td>
+                            <?php $runner = get_option(self::OPT_RUNNER, 'as'); $has_as = function_exists('as_enqueue_async_action'); ?>
+                            <select name="<?php echo esc_attr(self::OPT_RUNNER); ?>">
+                                <option value="as" <?php selected($runner,'as'); ?>>Action Scheduler <?php echo $has_as?'':'(not installed)'; ?></option>
+                                <option value="direct" <?php selected($runner,'direct'); ?>>Direct + WP‑Cron fallback</option>
+                            </select>
+                            <p class="description">Recommended: Action Scheduler (visible jobs, concurrency control). If not installed, select Direct + WP‑Cron.</p>
+                        </td>
+                    </tr>
                 </table>
                 <?php submit_button(); ?>
             </form>
@@ -145,7 +218,7 @@ final class DS_AI_Product_SEO {
     /* ===================== Category fields ===================== */
     public static function cat_fields_add(){ ?>
         <div class="form-field">
-            <label for="ds_cat_keywords">Dutch keywords (comma-separated)</label>
+            <label for="ds_cat_keywords">Keywords (comma-separated)</label>
             <input type="text" name="ds_cat_keywords" id="ds_cat_keywords" value="" />
             <p class="description">مثلاً: vaas, tafel lamp, 3D print decor</p>
         </div>
@@ -159,7 +232,7 @@ final class DS_AI_Product_SEO {
         $kws = get_term_meta($term->term_id, 'ds_cat_keywords', true);
         $url = get_term_meta($term->term_id, 'ds_cat_url', true); ?>
         <tr class="form-field">
-            <th scope="row"><label for="ds_cat_keywords">Dutch keywords</label></th>
+            <th scope="row"><label for="ds_cat_keywords">Keywords (any language)</label></th>
             <td><input name="ds_cat_keywords" id="ds_cat_keywords" type="text" value="<?php echo esc_attr($kws); ?>" class="regular-text" /></td>
         </tr>
         <tr class="form-field">
@@ -180,11 +253,9 @@ final class DS_AI_Product_SEO {
         if (!current_user_can('edit_post', $post->ID)) { echo '<p>Insufficient permissions.</p>'; return; }
         wp_nonce_field(self::NONCE, self::NONCE);
 
-        $allowed = array_filter(array_map('trim', explode(',', get_option(self::OPT_ALLOWED_MODELS, 'gpt-5,gpt-4o,gpt-4o-mini'))));
-        $default = get_option(self::OPT_DEFAULT_MODEL, 'gpt-5');
 
         // overrides per product
-        $ovr_url  = get_post_meta($post->ID, '_ds_ai_cat_url', true);
+        $ext_link = get_post_meta($post->ID, '_ds_ai_external_url', true);
         $ovr_kws  = get_post_meta($post->ID, '_ds_ai_dutch_kws', true);
         $ovr_story= get_post_meta($post->ID, '_ds_ai_story', true);
 
@@ -196,17 +267,12 @@ final class DS_AI_Product_SEO {
             <p style="margin:0 0 6px;">Has images: <strong><?php echo $has_img?'Yes':'No'; ?></strong></p>
         </div>
 
-        <p><label><strong>Model</strong></label><br/>
-            <select id="ds-ai-model" style="width:100%"><?php foreach($allowed as $m): ?>
-                <option value="<?php echo esc_attr($m); ?>" <?php selected($default,$m); ?>><?php echo esc_html($m); ?></option>
-            <?php endforeach; ?></select>
-        </p>
 
-        <p><label><strong>Override Category URL (optional)</strong></label>
-            <input type="text" id="ds-ai-ovr-url" style="width:100%" placeholder="/category/vases/" value="<?php echo esc_attr($ovr_url); ?>"/>
+        <p><label><strong>External link (optional)</strong></label>
+            <input type="text" id="ds-ai-external-link" style="width:100%" placeholder="https://example.com/..." value="<?php echo esc_attr($ext_link); ?>"/>
         </p>
-        <p><label><strong>Dutch keywords (optional)</strong></label>
-            <textarea id="ds-ai-ovr-kws" rows="2" style="width:100%" placeholder="vaas, modern, 3D print"><?php echo esc_textarea($ovr_kws); ?></textarea>
+        <p><label><strong>Additional keywords (optional)</strong></label>
+            <textarea id="ds-ai-ovr-kws" rows="2" style="width:100%" placeholder="long-tail, material, style"><?php echo esc_textarea($ovr_kws); ?></textarea>
         </p>
         <p><label><strong>Personal story (optional)</strong></label>
             <textarea id="ds-ai-ovr-story" rows="2" style="width:100%" placeholder="1–3 sentences for human touch"><?php echo esc_textarea($ovr_story); ?></textarea>
@@ -225,8 +291,7 @@ final class DS_AI_Product_SEO {
             const $ = (s,c=document)=>c.querySelector(s);
             const live = $('#ds-ai-live-log');
             const runBtn  = $('#ds-ai-run');
-            const model= $('#ds-ai-model');
-            const url  = $('#ds-ai-ovr-url');
+            const ext  = $('#ds-ai-external-link');
             const kws  = $('#ds-ai-ovr-kws');
             const story= $('#ds-ai-ovr-story');
             const postId = <?php echo (int)$post->ID; ?>;
@@ -266,9 +331,8 @@ final class DS_AI_Product_SEO {
                     fd.append('<?php echo esc_js(self::NONCE); ?>', nonce);
                     fd.append('op', op);
                     fd.append('post_id', String(postId));
-                    fd.append('model', model.value);
                     fd.append('run_id', currentRunId);
-                    fd.append('ovr_url', url.value);
+                    fd.append('external_link', ext.value);
                     fd.append('ovr_kws', kws.value);
                     fd.append('ovr_story', story.value);
 
@@ -318,56 +382,83 @@ final class DS_AI_Product_SEO {
         if (!wp_verify_nonce($_POST[self::NONCE] ?? '', self::NONCE)) self::json_error('Bad nonce', 400);
 
         $post_id = (int)($_POST['post_id'] ?? 0);
-        $model   = sanitize_text_field($_POST['model'] ?? get_option(self::OPT_DEFAULT_MODEL, 'gpt-5'));
+        $model   = 'gpt-5';
         $op      = sanitize_text_field($_POST['op'] ?? 'generate');
 
-        $ovr_url   = sanitize_text_field($_POST['ovr_url'] ?? '');
-        $ovr_kws   = sanitize_text_field($_POST['ovr_kws'] ?? '');
-        $ovr_story = sanitize_textarea_field($_POST['ovr_story'] ?? '');
+        $external_link = sanitize_text_field($_POST['external_link'] ?? '');
+        $ovr_kws       = sanitize_text_field($_POST['ovr_kws'] ?? '');
+        $ovr_story     = sanitize_textarea_field($_POST['ovr_story'] ?? '');
 
         if (!$post_id) self::json_error('Missing post_id', 400);
         if ($op !== 'generate') self::json_error('Unsupported op', 400);
 
         // Persist overrides
-        if ($ovr_url !== '')   update_post_meta($post_id, '_ds_ai_cat_url', $ovr_url);
-        if ($ovr_kws !== '')   update_post_meta($post_id, '_ds_ai_dutch_kws', $ovr_kws);
-        if ($ovr_story !== '') update_post_meta($post_id, '_ds_ai_story', $ovr_story);
+        if ($external_link !== '') update_post_meta($post_id, '_ds_ai_external_url', $external_link);
+        if ($ovr_kws !== '')       update_post_meta($post_id, '_ds_ai_dutch_kws', $ovr_kws);
+        if ($ovr_story !== '')     update_post_meta($post_id, '_ds_ai_story', $ovr_story);
 
         self::log_start($run_id);
         self::log($run_id, date('H:i:s') . " — Queueing op={$op} model={$model} post_id={$post_id}");
 
-        // Spawn direct async worker (no WP-Cron / no runner)
         $args = ['post_id'=>$post_id,'model'=>$model,'op'=>$op,'run_id'=>$run_id];
-        self::spawn_direct($args, $run_id);
 
+        $runner = get_option(self::OPT_RUNNER, 'as');
+        if ($runner === 'as' && function_exists('as_enqueue_async_action')) {
+            // Enqueue via Action Scheduler
+            $args['source'] = 'action-scheduler';
+            try {
+                $job_id = as_enqueue_async_action(self::QUEUE_HOOK, [$args], 'ds-ai');
+                self::log($run_id, 'Enqueued Action Scheduler job #' . $job_id . ' (source=action-scheduler).');
+                self::json_success(['msg'=>'Queued. Action Scheduler will process this job shortly…']);
+            } catch (Exception $e) {
+                self::log($run_id, 'Action Scheduler enqueue failed: ' . $e->getMessage() . ' — falling back to Direct + WP‑Cron.');
+                // Fall through to direct path below
+            }
+        }
+
+        // Fall back to Direct + WP‑Cron
+        self::spawn_direct($args, $run_id);
+        self::schedule_fallback($args, $run_id, 10);
         self::json_success(['msg'=>'Queued. Background worker will process…']);
     }
 
     /* ===================== Direct async worker endpoint ===================== */
     public static function direct_worker() {
-        self::trap_start(sanitize_text_field($_POST['run_id'] ?? ''));
+        $rid = sanitize_text_field($_POST['run_id'] ?? '');
+        self::trap_start($rid);
         ignore_user_abort(true);
+        self::log($rid, 'Direct worker endpoint hit.');
 
         if (!empty($_SERVER['REQUEST_METHOD']) && strtolower($_SERVER['REQUEST_METHOD']) === 'post') {
             $post_id = (int)($_POST['post_id'] ?? 0);
-            $model   = sanitize_text_field($_POST['model'] ?? '');
+            $model   = 'gpt-5';
             $op      = sanitize_text_field($_POST['op'] ?? '');
-            $run_id  = sanitize_text_field($_POST['run_id'] ?? '');
+            $run_id  = $rid;
             $sig     = sanitize_text_field($_POST['sig'] ?? '');
 
             $args = ['post_id'=>$post_id,'model'=>$model,'op'=>$op,'run_id'=>$run_id];
+            $sig_ok = self::verify_sig($args, $sig);
+            self::log($run_id, 'Direct worker received args: post_id=' . $post_id . ' op=' . $op . ' sig_ok=' . ($sig_ok ? 'yes' : 'no'));
 
-            if ($post_id && $op === 'generate' && self::verify_sig($args, $sig)) {
+            if ($post_id && $op === 'generate' && $sig_ok) {
                 header('Content-Type: text/plain; charset=utf-8');
                 echo 'OK';
                 @fastcgi_finish_request();
+                $args['source'] = 'direct';
+                self::log($run_id, 'Direct worker dispatching to worker(source=direct)…');
                 self::worker($args);
                 wp_die();
+            } else {
+                self::log($run_id, 'Direct worker early exit: invalid args or signature.');
+                self::mark_failed($run_id, 'direct_invalid_args_or_sig');
             }
+        } else {
+            self::log($rid, 'Direct worker called with non-POST method.');
+            self::mark_failed($rid, 'direct_non_post');
         }
-        status_header(400);
-        echo 'BAD';
-        wp_die();
+    status_header(400);
+    echo 'BAD';
+    wp_die();
     }
 
     /* ===================== Worker ===================== */
@@ -375,29 +466,58 @@ final class DS_AI_Product_SEO {
         $run_id = sanitize_text_field($args['run_id'] ?? '');
         self::trap_start($run_id);
 
+        // Prevent duplicate runs (direct spawn, WP‑Cron fallback, or AS)
+        $src = isset($args['source']) ? (string)$args['source'] : 'unknown';
+        $started_key = self::started_key($run_id);
+        $done = get_transient(self::done_key($run_id));
+        $failed = get_transient(self::failed_key($run_id));
+        $prev = get_transient($started_key);
+        if ($prev && !$failed && !$done) {
+            $prev_by = is_array($prev) ? ($prev['by'] ?? 'unknown') : 'unknown';
+            $prev_t  = (int) (is_array($prev) ? ($prev['t'] ?? 0) : 0);
+            $age = time() - $prev_t;
+            if ($age > 120) {
+                self::log($run_id, 'No heartbeat/finish for >120s; allowing recovery retry. Previous by=' . $prev_by . ' at ' . ($prev_t?date('H:i:s',$prev_t):'n/a'));
+                // Overwrite started latch for recovery
+                set_transient($started_key, ['by'=>$src ?: 'unknown','t'=>time()], 60*MINUTE_IN_SECONDS);
+            } else {
+                self::log($run_id, 'Duplicate worker invocation detected; exiting. First started by=' . $prev_by . ' at ' . ($prev_t?date('H:i:s',$prev_t):'n/a'));
+                return;
+            }
+        } else {
+            if (!self::mark_started($run_id, $src)) {
+                $prev = get_transient($started_key);
+                $prev_by = is_array($prev) ? ($prev['by'] ?? 'unknown') : 'unknown';
+                $prev_t  = (int) (is_array($prev) ? ($prev['t'] ?? 0) : 0);
+                self::log($run_id, 'Duplicate worker invocation detected; exiting. First started by=' . $prev_by . ' at ' . ($prev_t?date('H:i:s',$prev_t):'n/a'));
+                return;
+            }
+        }
+
         $post_id = (int)($args['post_id'] ?? 0);
-        $model   = sanitize_text_field($args['model'] ?? get_option(self::OPT_DEFAULT_MODEL,'gpt-5'));
+        $model   = 'gpt-5';
         $op      = sanitize_text_field($args['op'] ?? 'generate');
 
-        self::log($run_id,"Worker start op={$op} model={$model} post_id={$post_id}");
+        self::log($run_id,"Worker start op={$op} model={$model} post_id={$post_id} source={$src}");
 
         $api_key = self::get_api_key();
         if (!$api_key){
             self::log($run_id,'ERROR: API key missing (define OPENAI_API_KEY or set in settings).');
+            self::mark_failed($run_id, 'missing_api_key');
             return;
         } else {
             self::log($run_id,'API key OK (masked): '.substr($api_key,0,4).'•••'.substr($api_key,-4));
         }
 
         $post = get_post($post_id);
-        if (!$post || $post->post_type!=='product'){ self::log($run_id,'ERROR: Invalid product'); return; }
+        if (!$post || $post->post_type!=='product'){ self::log($run_id,'ERROR: Invalid product'); self::mark_failed($run_id,'invalid_product'); return; }
 
         // Build context
         self::log($run_id,'Building context...');
         $ctx = self::build_context($post_id);
-        if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); return; }
-        if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   return; }
-        self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws='.($ctx['dutch_keywords']?1:0).', related='.(isset($ctx['related_products'])?count($ctx['related_products']):0));
+        if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); self::mark_failed($run_id,'no_category'); return; }
+        if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   self::mark_failed($run_id,'no_images'); return; }
+        self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws=' . (!empty($ctx['keywords']) ? 1 : 0));
 
         // Messages
         self::log($run_id,'Building messages…');
@@ -406,13 +526,12 @@ final class DS_AI_Product_SEO {
 
         $user_inputs = [
             "PRODUCT INFORMATION" => [
-                "product_name"    => $post->post_title,
-                "product_category"=> $ctx['primary_cat_name'],
-                "dutch_keywords"  => $ctx['dutch_keywords'],
-                "note"            => "Images attached below. Analysis allowed."
+                "product_name"     => $post->post_title,
+                "product_category" => $ctx['primary_cat_name'],
+                "keywords"         => $ctx['keywords'],
+                "note"             => "Images attached below. Analysis allowed."
             ],
-            "INTERNAL LINK URL (Required)" => $ctx['category_url'],
-            "RELATED PRODUCTS (use for internal links)" => isset($ctx['related_products']) ? $ctx['related_products'] : [],
+            "EXTERNAL LINK (Optional)" => $ctx['external_link'],
             "USER EXPERIENCE INPUT (Optional)" => $ctx['story'] ?: ''
         ];
         $lines = [];
@@ -425,14 +544,43 @@ final class DS_AI_Product_SEO {
         $content = [
             ['type'=>'text', 'text'=> implode("\n\n", $lines)]
         ];
-        foreach($ctx['img_urls'] as $u){
+        // Replace localhost images with a test image URL when developing locally
+        $test_img = 'https://shop.dreamli.nl/wp-content/uploads/2025/10/1642280007130.jpg';
+        $img_urls_for_payload = [];
+        foreach ($ctx['img_urls'] as $u) {
+            $is_local = false;
+            if (is_string($u)) {
+                $host = parse_url($u, PHP_URL_HOST);
+                if ($host) {
+                    $host_l = strtolower($host);
+                    if ($host_l === 'localhost' || $host_l === '127.0.0.1' || substr($host_l, -6) === '.local') {
+                        $is_local = true;
+                    }
+                } elseif (stripos($u, 'localhost') !== false) {
+                    // Fallback string match
+                    $is_local = true;
+                }
+            }
+            if ($is_local) {
+                self::log($run_id, 'Dev mode image replacement: '.$u.' -> '.$test_img);
+                $img_urls_for_payload[] = $test_img;
+            } else {
+                $img_urls_for_payload[] = $u;
+            }
+        }
+        foreach($img_urls_for_payload as $u){
             $content[] = ['type'=>'image_url','image_url'=>['url'=>$u]];
         }
 
-        $inst = 'Return a single JSON object only (valid JSON, no markdown). Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
-               . '- Use the provided category_url exactly 3 times across the copy (1× in short_description, 2× in long_description_html). '
-               . '- Also insert 3–7 natural internal links to product pages, ONLY from the provided "RELATED PRODUCTS" list (use their url; anchor text = product title or a natural phrase). '
-               . '- Do not invent URLs. Keep links HTML with <a href="...">...</a>.';
+        $inst = 'TOP PRIORITY: Return ONE json object only. No prose, no Markdown, no code fences. '
+               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
+               . 'Place ALL HTML only inside long_description_html. Do not output any HTML anywhere else. '
+               . 'Use internal links only if they are present in the provided context via tools (vector store or web search). Do not invent URLs. '
+               . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
+               . 'If an external link is provided, you may include it naturally up to 1–2 times. '
+               . 'Keep links HTML with <a href="...">...</a>.\n\n'
+               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"..."}\n\n'
+               . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
         $messages = [
             ['role'=>'system','content'=>$system],
@@ -440,39 +588,144 @@ final class DS_AI_Product_SEO {
             ['role'=>'system','content'=>$inst]
         ];
 
-        // Call OpenAI
-        self::log($run_id,'Calling OpenAI (json)…');
+        // Build Responses API payload
+        self::log($run_id,'Calling OpenAI /v1/responses…');
+
+        $prompt_id      = trim((string)get_option(self::OPT_PROMPT_ID,''));
+        $prompt_version = trim((string)get_option(self::OPT_PROMPT_VERSION,'3'));
+        $vs_csv         = (string)get_option(self::OPT_VECTOR_STORE_IDS,'');
+        $vs_ids         = array_values(array_filter(array_map('trim', explode(',', $vs_csv))));
+        $enable_web     = (string)get_option(self::OPT_ENABLE_WEB_SEARCH,'yes') === 'yes';
+        $search_size    = (string)get_option(self::OPT_SEARCH_CONTEXT,'medium');
+        $store_resp     = (string)get_option(self::OPT_STORE_RESP,'yes') === 'yes';
+        $include_csv    = (string)get_option(self::OPT_INCLUDE_FIELDS,'reasoning.encrypted_content,web_search_call.action.sources');
+        $include_fields = array_values(array_filter(array_map('trim', explode(',', $include_csv))));
+
+        // Compose input blocks (text + images)
+        $full_text = implode("\n\n", $lines) . "\n\n" . $inst;
+        $content_blocks = [ ['type'=>'input_text', 'text'=> $full_text] ];
+        // Use dev-substituted list to avoid localhost images in payload
+        foreach ($img_urls_for_payload as $u) { $content_blocks[] = ['type'=>'input_image','image_url'=>$u]; }
+        // Log summary of images being sent
+        $img_count = 0; $img_preview = [];
+        foreach ($img_urls_for_payload as $iu) { $img_count++; if (count($img_preview)<2) { $img_preview[] = $iu; } }
+        self::log($run_id, 'Input images sent: '. $img_count . ( $img_count ? (' [e.g., '.implode(', ', array_map(function($s){ return (strlen($s)>120?substr($s,0,117).'...':$s); }, $img_preview)).']') : '' ) );
+
+        $input = [[ 'role'=>'user', 'content'=> $content_blocks ]];
+
+        $tools = [];
+        $tools[] = [ 'type'=>'file_search', 'vector_store_ids'=>$vs_ids ];
+//        $tools[] = [
+//            'type' => 'web_search',
+//            'user_location' => [ 'type' => 'approximate' ],
+//            'search_context_size' => in_array($search_size, ['small','medium','large'], true) ? $search_size : 'medium'
+//        ];
+
+
         $payload = [
-            'model'=>$model,
-            'response_format'=>['type'=>'json_object'],
-            'messages'=>$messages
+            'input'     => [],
+            'reasoning' => [ 'summary'=>'auto' ],
+            'tools'     => $tools,
+            'store'     => $store_resp,
+            'include'   => $include_fields,
         ];
+        if ($prompt_id !== '') {
+            $payload['prompt'] = ['id'=>$prompt_id,'version'=>$prompt_version?:'4'];
+            $payload['input'] = $input; // include images + keywords + instructions
+            self::log($run_id, 'Responses payload (prompt mode) with constructed input blocks (images+keywords).');
+        } else {
+            $payload['model'] = $model;
+            $payload['instructions'] = $system;
+            $payload['input'] = $input;
+            self::log($run_id, 'Responses payload (model mode) with constructed input blocks.');
+        }
+
         $t0 = microtime(true);
         list($parsed, $code, $err) = self::openai($api_key, $payload, $run_id);
         $dt = round(microtime(true)-$t0, 3);
         if ($err){
-            self::log($run_id,'OpenAI ERROR: '.$err);
-            return;
+            // Fallback: Some upstreams reject text.format object; retry without it
+            if ((int)$code === 400 && is_string($err) && stripos($err, 'text.format') !== false) {
+                self::log($run_id, 'OpenAI 400 related to text.format — retrying once without text.format');
+                unset($payload['text']);
+                $t1 = microtime(true);
+                list($parsed, $code, $err) = self::openai($api_key, $payload, $run_id);
+                $dt = round(microtime(true)-$t1, 3);
+                if ($err){
+                    self::log($run_id,'OpenAI ERROR (after fallback): '.$err);
+                    self::mark_failed($run_id,'openai_error_after_fallback');
+                    return;
+                }
+            } else {
+                self::log($run_id,'OpenAI ERROR: '.$err);
+                self::mark_failed($run_id,'openai_error');
+                return;
+            }
         }
         self::log($run_id,'Returned in '.$dt.'s');
 
-        $content = isset($parsed['choices'][0]['message']['content']) ? $parsed['choices'][0]['message']['content'] : '';
-        if (is_array($content)) {
-            $content = isset($content['text']) ? (string)$content['text'] : wp_json_encode($content);
+        // Responses API parsing: collect candidate texts and robustly extract a single JSON object
+        $candidates = [];
+        if (isset($parsed['output_text']) && is_string($parsed['output_text'])) {
+            $candidates[] = $parsed['output_text'];
         }
-        if (!is_string($content)) {
-            $content = '';
+        if (isset($parsed['output']) && is_array($parsed['output'])) {
+            foreach ($parsed['output'] as $out) {
+                if (isset($out['content']) && is_array($out['content'])) {
+                    foreach ($out['content'] as $c) {
+                        if (isset($c['text']) && is_string($c['text'])) {
+                            $candidates[] = $c['text'];
+                        }
+                    }
+                }
+            }
+        }
+        if (isset($parsed['choices'][0]['message']['content'])) {
+            $tmp = $parsed['choices'][0]['message']['content'];
+            if (is_array($tmp)) {
+                $candidates[] = isset($tmp['text']) ? (string)$tmp['text'] : wp_json_encode($tmp);
+            } else {
+                $candidates[] = (string)$tmp;
+            }
+        }
+        // De-duplicate candidates
+        $candidates = array_values(array_unique(array_map(function($s){ return is_string($s)?$s:''; }, $candidates)));
+
+        $data = null;
+        $debug_logged = false;
+        foreach ($candidates as $idx => $cand) {
+            if (!$debug_logged) {
+                $dbg = substr($cand, 0, 400);
+                self::log($run_id, 'Model text candidate #'.($idx+1).' snippet: '.preg_replace('/\s+/', ' ', $dbg));
+                $debug_logged = true;
+            }
+            $raw = trim($cand);
+            // Strip code fences if present
+            if (strpos($raw, '```') !== false) {
+                $raw = preg_replace('/^```[a-zA-Z]*\s*/', '', $raw);
+                $raw = preg_replace('/\s*```$/', '', $raw);
+                $raw = trim((string)$raw);
+                self::log($run_id, 'Stripped code fences from model output.');
+            }
+            // If HTML blob, still try to extract JSON inside
+            // Extract first JSON object substring if the string doesn't start with '{'
+            $candidate_json = $raw;
+            if ($raw === '' || $raw[0] !== '{') {
+                $p1 = strpos($raw, '{');
+                $p2 = strrpos($raw, '}');
+                if ($p1 !== false && $p2 !== false && $p2 > $p1) {
+                    $candidate_json = substr($raw, $p1, $p2 - $p1 + 1);
+                    self::log($run_id, 'Extracted JSON object substring from surrounding text.');
+                }
+            }
+            $decoded = json_decode($candidate_json, true);
+            if (is_array($decoded)) { $data = $decoded; break; }
         }
 
-        if (is_string($content) && strlen($content) > 0 && substr($content,0,1) === '<'){
-            self::log($run_id,'ERROR: HTML returned instead of JSON. Snippet: '.substr($content,0,200));
-            return;
-        }
-
-        $data = json_decode($content, true);
         if (!is_array($data)){
-            $snippet = is_string($content) ? substr($content,0,300) : '[no content]';
+            $snippet = count($candidates) ? substr($candidates[0],0,300) : '[no content]';
             self::log($run_id,'ERROR: Invalid JSON. Snippet: '.$snippet);
+            self::mark_failed($run_id,'invalid_json');
             return;
         }
 
@@ -494,8 +747,37 @@ final class DS_AI_Product_SEO {
         }
 
         self::log($run_id,'Post updated');
+
+        // Charge user ledger for this successful OpenAI generation
+        $price = (float) get_option(self::OPT_GPT5_PRICE_EUR, 0);
+        $user_id = (int) get_post_field('post_author', $post_id);
+        $guard_key = 'ds_ai_charge_' . $run_id;
+        if ($price > 0 && $user_id > 0) {
+            if (!get_transient($guard_key)) {
+                $meta = [
+                    'post_id' => $post_id,
+                    'run_id'  => $run_id,
+                    'model'   => $model,
+                    'prompt_id' => $prompt_id,
+                    'prompt_version' => $prompt_version,
+                    'vector_store_ids' => $vs_ids,
+                    'web_search' => $enable_web ? 1 : 0,
+                    'store_response' => $store_resp ? 1 : 0,
+                ];
+                $ref = 'ai_seo:' . $post_id . ':' . $run_id;
+                $ledger_id = DS_Wallet::add($user_id, 'ai_seo_request', 0 - $price, $ref, 'posted', $meta);
+                set_transient($guard_key, $ledger_id, 30*MINUTE_IN_SECONDS);
+                self::log($run_id, 'Ledger charged -' . number_format($price, 2) . ' EUR (entry #' . $ledger_id . ')');
+            } else {
+                self::log($run_id, 'Ledger charge already recorded for this run.');
+            }
+        } else {
+            self::log($run_id, 'Ledger: no charge (price=0 or missing author).');
+        }
+
         $u = $parsed['usage'] ?? [];
         self::log($run_id,'Usage: prompt='.intval($u['prompt_tokens']??0).' completion='.intval($u['completion_tokens']??0).' total='.intval($u['total_tokens']??0));
+        self::mark_done($run_id);
         self::log($run_id,'Worker done');
     }
 
@@ -555,7 +837,6 @@ final class DS_AI_Product_SEO {
         $has_cat   = !is_wp_error($cat_terms) && !empty($cat_terms);
         $cat_names = [];
         $primary   = '';
-        $cat_url   = '';
 
         if ($has_cat){
             $primary = $cat_terms[0]->name;
@@ -567,23 +848,21 @@ final class DS_AI_Product_SEO {
                     if ($t && !is_wp_error($t)) array_unshift($chain, $t->name);
                 }
                 $cat_names[] = implode(' > ', $chain);
-
-                if (!$cat_url){
-                    $stored_url = get_term_meta($term->term_id, 'ds_cat_url', true);
-                    if ($stored_url) $cat_url = $stored_url;
-                }
             }
         }
 
-        // Product overrides
-        $ovr_url   = get_post_meta($post_id, '_ds_ai_cat_url', true);
-        if ($ovr_url) $cat_url = $ovr_url;
+        // External link (optional)
+        $external_link = get_post_meta($post_id, '_ds_ai_external_url', true);
 
-        // Dutch keywords
-        $dutch = get_post_meta($post_id, '_ds_ai_dutch_kws', true);
-        if (!$dutch && $has_cat){
-            $dutch = get_term_meta($cat_terms[0]->term_id, 'ds_cat_keywords', true);
+        // Keywords: category keywords + additional keywords (product-level), merged & deduped
+        $cat_kws = '';
+        if ($has_cat) {
+            $cat_kws = (string) get_term_meta($cat_terms[0]->term_id, 'ds_cat_keywords', true);
         }
+        $additional_kws = (string) get_post_meta($post_id, '_ds_ai_dutch_kws', true);
+        $all = array_filter(array_map('trim', explode(',', $cat_kws . (strlen($cat_kws)&&strlen($additional_kws) ? ',' : '') . $additional_kws)));
+        $all = array_values(array_unique($all));
+        $keywords = implode(', ', $all);
 
         // Story
         $story = get_post_meta($post_id, '_ds_ai_story', true);
@@ -600,20 +879,15 @@ final class DS_AI_Product_SEO {
         }
         $img_urls = array_values(array_unique($img_urls));
 
-        // Related products with byte-bounded context
-        $raw_related = self::get_related_products_raw($post_id, (int)get_option(self::OPT_RELATED_LIMIT, 40));
-        $related     = self::cap_array_bytes($raw_related, (int)get_option(self::OPT_CONTEXT_MAX_BYTES, 24000));
-
         return [
             'has_cat'          => $has_cat,
             'cat_names'        => $cat_names,
             'primary_cat_name' => $primary,
-            'category_url'     => $cat_url,
-            'dutch_keywords'   => $dutch,
+            'keywords'         => $keywords,
+            'external_link'    => $external_link,
             'story'            => $story,
             'has_images'       => !empty($img_urls),
             'img_urls'         => $img_urls,
-            'related_products' => $related
         ];
     }
 
@@ -640,9 +914,10 @@ final class DS_AI_Product_SEO {
         error_log("AI SEO: started generate() at " . date('H:i:s'));
         @set_time_limit(900);
 
-        $endpoint = 'https://api.openai.com/v1/chat/completions';
+        $endpoint = 'https://api.openai.com/v1/responses';
         $body_json = wp_json_encode($payload);
-        self::log($run_id, 'OpenAI payload bytes='.strlen($body_json).', model='.$payload['model']);
+        $model_for_log = isset($payload['model']) ? $payload['model'] : (isset($payload['prompt']['id']) ? ('prompt:' . $payload['prompt']['id']) : 'n/a');
+        self::log($run_id, 'OpenAI payload bytes='.strlen($body_json).', target='.$model_for_log);
 
         $args = [
             'headers'=>[
@@ -767,6 +1042,50 @@ final class DS_AI_Product_SEO {
             'headers'     => ['Expect' => '']
         ]);
         self::log($run_id, 'Spawned direct async worker (no WP-Cron).');
+    }
+
+    /* ===================== Fallback & duplicate-run guard ===================== */
+    private static function started_key($run_id){ return 'ds_ai_started_'.$run_id; }
+    private static function done_key($run_id){ return 'ds_ai_done_'.$run_id; }
+    private static function failed_key($run_id){ return 'ds_ai_failed_'.$run_id; }
+    private static function mark_started($run_id, $by = 'unknown'){
+        if (!$run_id) return true;
+        $key = self::started_key($run_id);
+        // If a previous run failed, allow starting again and overwrite the latch
+        if (get_transient(self::failed_key($run_id))) {
+            set_transient($key, ['by' => $by ?: 'unknown', 't' => time()], 60*MINUTE_IN_SECONDS);
+            return true;
+        }
+        // If already started and not marked failed, block duplicates
+        if (get_transient($key)) return false;
+        set_transient($key, ['by' => $by ?: 'unknown', 't' => time()], 60*MINUTE_IN_SECONDS);
+        return true;
+    }
+    private static function mark_done($run_id){
+        if (!$run_id) return;
+        set_transient(self::done_key($run_id), 1, 60*MINUTE_IN_SECONDS);
+        // Clear any failed flag from prior attempts
+        delete_transient(self::failed_key($run_id));
+    }
+    private static function mark_failed($run_id, $reason = ''){
+        if (!$run_id) return;
+        set_transient(self::failed_key($run_id), ['t'=>time(),'reason'=>$reason], 30*MINUTE_IN_SECONDS);
+    }
+    private static function schedule_fallback($args, $run_id, $delay = 10){
+        $delay = max(1, (int)$delay);
+        $when = time() + $delay;
+        // Tag as coming from WP-Cron for clearer logs
+        $args['source'] = 'wp-cron';
+        // Ensure we don't schedule duplicates for the same run_id
+        if (!wp_next_scheduled(self::QUEUE_HOOK, [$args])) {
+            $ok = wp_schedule_single_event($when, self::QUEUE_HOOK, [$args]);
+            self::log($run_id, $ok ? ("Scheduled WP-Cron fallback in {$delay}s.") : 'WP-Cron schedule failed.');
+        } else {
+            self::log($run_id, 'WP-Cron fallback already scheduled.');
+        }
+        if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
+            self::log($run_id, 'Warning: DISABLE_WP_CRON is true; fallback may not run.');
+        }
     }
 
     /* ===================== Logging (transient) ===================== */
