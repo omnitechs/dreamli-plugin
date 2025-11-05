@@ -23,6 +23,7 @@ final class DS_Admin_Menus {
         add_submenu_page('ds-root','Ledger','Ledger','manage_options','ds-ledger',[__CLASS__,'ledger']);
         add_submenu_page('ds-root','Orders Report','Orders Report','manage_options','ds-orders-report',[__CLASS__,'orders_report']);
         add_submenu_page('ds-root','Leaderboard','Leaderboard','manage_options','ds-leaderboard-admin',[__CLASS__,'leaderboard']);
+        add_submenu_page('ds-root','Dashboard','Dashboard','manage_options','ds-dashboard',[__CLASS__,'dashboard']);
     }
 
     static function root() {
@@ -47,6 +48,14 @@ final class DS_Admin_Menus {
                 // Wallet
                 'withdraw_min',
 
+                // View payouts settings
+                'enable_view_payouts','view_payout_rate_eur',
+                'view_cap_per_ip_per_product_per_day','view_cap_per_ip_per_day_sitewide','view_cap_per_viewer_per_day_sitewide',
+                'view_cap_per_product_per_day','view_cap_per_vendor_per_day','view_cap_per_vendor_per_month',
+                'view_cap_sitewide_per_day','view_cap_sitewide_per_month',
+                'payout_cap_per_vendor_per_day_eur','payout_cap_per_vendor_per_month_eur','payout_cap_sitewide_per_day_eur','payout_cap_sitewide_per_month_eur',
+                'view_pay_for_bots','view_record_bots','view_ua_denylist','view_excluded_vendors','view_excluded_products',
+
                 // Ads CPC
                 'ads_cpc_home','ads_cpc_category',
 
@@ -69,7 +78,8 @@ final class DS_Admin_Menus {
                 if (!isset($_POST[$f])) {
                     if (in_array($f, [
                         'posts_pending','products_pending',
-                        'curated_credit_enable','calc_round_cents','calc_custom_expr_enable'
+                        'curated_credit_enable','calc_round_cents','calc_custom_expr_enable',
+                        'enable_view_payouts','view_pay_for_bots','view_record_bots'
                     ], true)) {
                         $new[$f] = 0;
                     }
@@ -78,7 +88,7 @@ final class DS_Admin_Menus {
 
                 $val = $_POST[$f];
 
-                if (in_array($f, ['posts_pending','products_pending','curated_credit_enable','calc_round_cents','calc_custom_expr_enable'], true)) {
+                if (in_array($f, ['posts_pending','products_pending','curated_credit_enable','calc_round_cents','calc_custom_expr_enable','enable_view_payouts','view_pay_for_bots','view_record_bots'], true)) {
                     $new[$f] = (int) !!$val;
 
                 } elseif ($f === 'calc_mode') {
@@ -118,6 +128,21 @@ final class DS_Admin_Menus {
             $new['po_choice_rules'] = $rules;
             // -------------------------------------------
 
+            // Normalize list fields
+            if (isset($_POST['view_ua_denylist'])) {
+                $ua = is_array($_POST['view_ua_denylist']) ? $_POST['view_ua_denylist'] : explode(',', (string)$_POST['view_ua_denylist']);
+                $ua = array_values(array_filter(array_map(function($s){ return strtolower(trim(sanitize_text_field($s))); }, $ua)));
+                $new['view_ua_denylist'] = $ua;
+            }
+            if (isset($_POST['view_excluded_vendors'])) {
+                $ids = array_values(array_filter(array_map('intval', preg_split('/[\s,;]+/', (string)$_POST['view_excluded_vendors']))));
+                $new['view_excluded_vendors'] = $ids;
+            }
+            if (isset($_POST['view_excluded_products'])) {
+                $ids = array_values(array_filter(array_map('intval', preg_split('/[\s,;]+/', (string)$_POST['view_excluded_products']))));
+                $new['view_excluded_products'] = $ids;
+            }
+
             DS_Settings::update($new);
             echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
         }
@@ -148,6 +173,43 @@ final class DS_Admin_Menus {
 
             <h2 style="margin-top:24px;">Wallet / Payouts</h2>
             <p>Minimum withdrawal (€): <input type="number" step="0.01" name="withdraw_min" value="<?php echo esc_attr($s['withdraw_min']); ?>"></p>
+
+            <h2 style="margin-top:24px;">View Payouts</h2>
+            <p><label><input type="checkbox" name="enable_view_payouts" value="1" <?php checked($s['enable_view_payouts']); ?>> Enable paying per unique view (EUR)</label></p>
+            <p>Rate per paid view (€): <input type="number" step="0.0001" min="0" name="view_payout_rate_eur" value="<?php echo esc_attr($s['view_payout_rate_eur']); ?>"> <small>Paid once per viewer per product per day</small></p>
+
+            <h3>Caps — Counts (0 = disabled)</h3>
+            <table class="widefat striped" style="max-width:1000px;">
+              <tbody>
+                <tr><td style="width:380px;">Per IP per Product per Day</td><td><input type="number" step="1" min="0" name="view_cap_per_ip_per_product_per_day" value="<?php echo esc_attr($s['view_cap_per_ip_per_product_per_day']); ?>"></td></tr>
+                <tr><td>Per IP per Day (sitewide)</td><td><input type="number" step="1" min="0" name="view_cap_per_ip_per_day_sitewide" value="<?php echo esc_attr($s['view_cap_per_ip_per_day_sitewide']); ?>"></td></tr>
+                <tr><td>Per Viewer per Day (sitewide)</td><td><input type="number" step="1" min="0" name="view_cap_per_viewer_per_day_sitewide" value="<?php echo esc_attr($s['view_cap_per_viewer_per_day_sitewide']); ?>"></td></tr>
+                <tr><td>Per Product per Day</td><td><input type="number" step="1" min="0" name="view_cap_per_product_per_day" value="<?php echo esc_attr($s['view_cap_per_product_per_day']); ?>"></td></tr>
+                <tr><td>Per Vendor per Day</td><td><input type="number" step="1" min="0" name="view_cap_per_vendor_per_day" value="<?php echo esc_attr($s['view_cap_per_vendor_per_day']); ?>"></td></tr>
+                <tr><td>Per Vendor per Month</td><td><input type="number" step="1" min="0" name="view_cap_per_vendor_per_month" value="<?php echo esc_attr($s['view_cap_per_vendor_per_month']); ?>"></td></tr>
+                <tr><td>Sitewide per Day</td><td><input type="number" step="1" min="0" name="view_cap_sitewide_per_day" value="<?php echo esc_attr($s['view_cap_sitewide_per_day']); ?>"></td></tr>
+                <tr><td>Sitewide per Month</td><td><input type="number" step="1" min="0" name="view_cap_sitewide_per_month" value="<?php echo esc_attr($s['view_cap_sitewide_per_month']); ?>"></td></tr>
+              </tbody>
+            </table>
+
+            <h3>Caps — Payout (€)</h3>
+            <table class="widefat striped" style="max-width:1000px;">
+              <tbody>
+                <tr><td style="width:380px;">Per Vendor per Day (€)</td><td><input type="number" step="0.01" min="0" name="payout_cap_per_vendor_per_day_eur" value="<?php echo esc_attr($s['payout_cap_per_vendor_per_day_eur']); ?>"></td></tr>
+                <tr><td>Per Vendor per Month (€)</td><td><input type="number" step="0.01" min="0" name="payout_cap_per_vendor_per_month_eur" value="<?php echo esc_attr($s['payout_cap_per_vendor_per_month_eur']); ?>"></td></tr>
+                <tr><td>Sitewide per Day (€)</td><td><input type="number" step="0.01" min="0" name="payout_cap_sitewide_per_day_eur" value="<?php echo esc_attr($s['payout_cap_sitewide_per_day_eur']); ?>"></td></tr>
+                <tr><td>Sitewide per Month (€)</td><td><input type="number" step="0.01" min="0" name="payout_cap_sitewide_per_month_eur" value="<?php echo esc_attr($s['payout_cap_sitewide_per_month_eur']); ?>"></td></tr>
+              </tbody>
+            </table>
+
+            <h3>Bot and Exclusions</h3>
+            <p><label><input type="checkbox" name="view_record_bots" value="1" <?php checked($s['view_record_bots']); ?>> Record bot views (for analytics)</label>
+               &nbsp; <label><input type="checkbox" name="view_pay_for_bots" value="1" <?php checked($s['view_pay_for_bots']); ?>> Pay for bots (not recommended)</label></p>
+            <?php $ua_csv = is_array($s['view_ua_denylist']) ? implode(', ', $s['view_ua_denylist']) : (string)$s['view_ua_denylist']; ?>
+            <p>UA denylist (comma separated): <input type="text" name="view_ua_denylist" style="width:100%;max-width:780px;" value="<?php echo esc_attr($ua_csv); ?>"></p>
+            <?php $ex_v_csv = is_array($s['view_excluded_vendors']) ? implode(',', array_map('intval',$s['view_excluded_vendors'])) : (string)$s['view_excluded_vendors']; ?>
+            <?php $ex_p_csv = is_array($s['view_excluded_products']) ? implode(',', array_map('intval',$s['view_excluded_products'])) : (string)$s['view_excluded_products']; ?>
+            <p>Exclude Vendor IDs (CSV): <input type="text" name="view_excluded_vendors" value="<?php echo esc_attr($ex_v_csv); ?>" style="width:300px;"> &nbsp; Exclude Product IDs (CSV): <input type="text" name="view_excluded_products" value="<?php echo esc_attr($ex_p_csv); ?>" style="width:300px;"></p>
 
             <h2 style="margin-top:24px;">Promoted Products (CPC)</h2>
             <p>Cost per click – Home (€): <input type="number" step="0.01" name="ads_cpc_home" value="<?php echo esc_attr($s['ads_cpc_home']); ?>">
@@ -363,6 +425,94 @@ final class DS_Admin_Menus {
         DS_Leaderboard::render_filters($tab, $preset, $start, $end);
         DS_Leaderboard::render_table($rows, $tab, $paged, 50);
         echo '<p style="margin-top:12px;color:#666;">Views counted once per viewer per product per day. Time range: '.esc_html($start).' → '.esc_html($end).'</p>';
+        echo '</div>';
+    }
+
+    static function dashboard() {
+        if (!current_user_can('manage_options')) wp_die('No access.');
+        $preset = isset($_GET['preset']) ? sanitize_key($_GET['preset']) : 'weekly';
+        $from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
+        $to   = isset($_GET['to']) ? sanitize_text_field($_GET['to']) : '';
+        list($start, $end) = DS_Leaderboard::get_period($preset, $from, $to);
+        $from_d = substr($start,0,10); $to_d = substr($end,0,10);
+
+        global $wpdb;
+        $vt = class_exists('DS_Views') ? DS_Views::table() : '';
+        $wt = DS_Wallet::table();
+
+        // KPIs
+        $total_views = $vt ? (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$vt} WHERE view_date BETWEEN %s AND %s", $from_d, $to_d)) : 0;
+        $total_view_payouts = (float)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(amount),0) FROM {$wt} WHERE type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s", $start, $end));
+        $total_earned = (float)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) FROM {$wt} WHERE status IN ('posted','paid') AND created_at BETWEEN %s AND %s", $start, $end));
+        $total_spent  = (float)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) FROM {$wt} WHERE status IN ('posted','paid') AND created_at BETWEEN %s AND %s", $start, $end));
+        $new_products = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='product' AND post_status IN ('publish','private','draft','pending','future') AND post_date BETWEEN %s AND %s", $start, $end));
+
+        echo '<div class="wrap">';
+        echo '<h1>Dropship Dashboard</h1>';
+        echo '<form method="get" style="margin:12px 0;">';
+        echo '<input type="hidden" name="page" value="ds-dashboard">';
+        echo '<label>Period: <select name="preset">';
+        foreach (['daily'=>'Daily','weekly'=>'Weekly','monthly'=>'Monthly','custom'=>'Custom'] as $k=>$lab) {
+            printf('<option value="%s" %s>%s</option>', esc_attr($k), selected($preset,$k,false), esc_html($lab));
+        }
+        echo '</select></label> ';
+        echo '<label>From: <input type="date" name="from" value="'.esc_attr($from_d).'"></label> ';
+        echo '<label>To: <input type="date" name="to" value="'.esc_attr($to_d).'"></label> ';
+        echo '<button class="button">Apply</button>';
+        echo '</form>';
+
+        echo '<div class="card" style="padding:12px;max-width:1100px;background:#fff;border:1px solid #e5e5e5;">';
+        printf('<p><b>Total Views:</b> %d &nbsp; | &nbsp; <b>Total View Payouts:</b> €%0.2f &nbsp; | &nbsp; <b>Total Earnings (+):</b> €%0.2f &nbsp; | &nbsp; <b>Total Spend (−):</b> €%0.2f &nbsp; | &nbsp; <b>New Products:</b> %d</p>', $total_views, $total_view_payouts, $total_earned, $total_spent, $new_products);
+        echo '</div>';
+
+        // Top Vendors by Views
+        if ($vt) {
+            $top_vendors = $wpdb->get_results($wpdb->prepare("SELECT vendor_id AS user_id, COUNT(*) AS views FROM {$vt} WHERE view_date BETWEEN %s AND %s GROUP BY vendor_id ORDER BY views DESC LIMIT 10", $from_d, $to_d));
+            echo '<h2 style="margin-top:16px;">Top Vendors by Views</h2><table class="widefat striped"><thead><tr><th>User</th><th>Views</th></tr></thead><tbody>';
+            if ($top_vendors) {
+                foreach ($top_vendors as $r) {
+                    $u = get_user_by('id', (int)$r->user_id);
+                    printf('<tr><td>%s</td><td>%d</td></tr>', $u ? esc_html($u->display_name.' (@'.$u->user_login.')') : ('#'.(int)$r->user_id), (int)$r->views);
+                }
+            } else echo '<tr><td colspan="2">—</td></tr>';
+            echo '</tbody></table>';
+        }
+
+        // Top Vendors by View Earnings
+        $top_ve = $wpdb->get_results($wpdb->prepare("SELECT user_id, SUM(amount) AS euros FROM {$wt} WHERE type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s GROUP BY user_id ORDER BY euros DESC LIMIT 10", $start, $end));
+        echo '<h2 style="margin-top:16px;">Top Vendors by View Earnings</h2><table class="widefat striped"><thead><tr><th>User</th><th>€</th></tr></thead><tbody>';
+        if ($top_ve) {
+            foreach ($top_ve as $r) {
+                $u = get_user_by('id', (int)$r->user_id);
+                printf('<tr><td>%s</td><td>€%0.2f</td></tr>', $u ? esc_html($u->display_name.' (@'.$u->user_login.')') : ('#'.(int)$r->user_id), (float)$r->euros);
+            }
+        } else echo '<tr><td colspan="2">—</td></tr>';
+        echo '</tbody></table>';
+
+        // Top Products by Views
+        if ($vt) {
+            $top_products = $wpdb->get_results($wpdb->prepare("SELECT product_id, COUNT(*) AS views FROM {$vt} WHERE view_date BETWEEN %s AND %s GROUP BY product_id ORDER BY views DESC LIMIT 10", $from_d, $to_d));
+            echo '<h2 style="margin-top:16px;">Top Products by Views</h2><table class="widefat striped"><thead><tr><th>Product</th><th>Views</th></tr></thead><tbody>';
+            if ($top_products) {
+                foreach ($top_products as $r) {
+                    $title = get_the_title((int)$r->product_id) ?: ('#'.(int)$r->product_id);
+                    printf('<tr><td>%s</td><td>%d</td></tr>', esc_html($title), (int)$r->views);
+                }
+            } else echo '<tr><td colspan="2">—</td></tr>';
+            echo '</tbody></table>';
+        }
+
+        // Latest view payouts
+        $latest = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$wt} WHERE type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s ORDER BY id DESC LIMIT 25", $start, $end));
+        echo '<h2 style="margin-top:16px;">Latest View Reward Payouts</h2><table class="widefat striped"><thead><tr><th>ID</th><th>User</th><th>€</th><th>Ref</th><th>Created</th></tr></thead><tbody>';
+        if ($latest) {
+            foreach ($latest as $r) {
+                $u = get_user_by('id', (int)$r->user_id);
+                printf('<tr><td>%d</td><td>%s</td><td>€%0.4f</td><td>%s</td><td>%s</td></tr>', (int)$r->id, $u ? esc_html($u->user_login) : ('#'.(int)$r->user_id), (float)$r->amount, esc_html($r->ref_id), esc_html($r->created_at));
+            }
+        } else echo '<tr><td colspan="5">—</td></tr>';
+        echo '</tbody></table>';
+
         echo '</div>';
     }
 }

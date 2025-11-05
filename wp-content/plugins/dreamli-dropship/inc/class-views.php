@@ -22,7 +22,9 @@ final class DS_Views {
             PRIMARY KEY (id),
             UNIQUE KEY uniq_view (product_id, viewer_key, view_date),
             KEY vendor_date_idx (vendor_id, view_date),
-            KEY product_date_idx (product_id, view_date)
+            KEY product_date_idx (product_id, view_date),
+            KEY ip_product_day_idx (product_id, view_date, ip_hash),
+            KEY ip_day_idx (view_date, ip_hash)
         ) $charset;";
         require_once ABSPATH.'wp-admin/includes/upgrade.php';
         dbDelta($sql);
@@ -51,9 +53,22 @@ final class DS_Views {
         $ip_hash = $ip ? sha1($ip) : null;
         $ua_hash = $ua ? sha1($ua) : null;
 
+        // Settings and bot filtering
+        $s = DS_Settings::get();
+        $ua_deny = array_map('strtolower', (array)($s['view_ua_denylist'] ?? []));
+        $ua_is_bot = false;
+        if ($ua && $ua_deny) {
+            $ua_lower = strtolower($ua);
+            foreach ($ua_deny as $needle) { if ($needle!=='' && strpos($ua_lower, $needle) !== false) { $ua_is_bot = true; break; } }
+        }
+        if ($ua_is_bot && empty($s['view_record_bots'])) {
+            // Skip both recording and paying
+            return;
+        }
+
+        // Insert once per product+viewer+day
         global $wpdb; $table = self::table();
         $now = DS_Helpers::now();
-        // Insert once per product+viewer+day
         $sql = $wpdb->prepare(
             "INSERT INTO {$table} (product_id, vendor_id, viewer_key, ip_hash, ua_hash, view_date, created_at)
              VALUES (%d,%d,%s,%s,%s,%s,%s)
@@ -61,6 +76,118 @@ final class DS_Views {
             $product_id, $vendor_id, $viewer_key, $ip_hash, $ua_hash, $today, $now
         );
         $wpdb->query($sql);
+        $is_new = (int)$wpdb->insert_id > 0;
+
+        // Payout logic (only on newly inserted rows)
+        if (!$is_new) return;
+        $rate = (float)($s['view_payout_rate_eur'] ?? 0);
+        $enable = !empty($s['enable_view_payouts']);
+        if (!$enable || $rate <= 0) return;
+        if ($ua_is_bot && empty($s['view_pay_for_bots'])) return;
+        // Exclusions
+        if (!empty($s['view_excluded_vendors']) && in_array($vendor_id, (array)$s['view_excluded_vendors'], true)) return;
+        if (!empty($s['view_excluded_products']) && in_array($product_id, (array)$s['view_excluded_products'], true)) return;
+
+        // Apply count-based caps
+        $from_day = $today; $to_day = $today;
+        $month_start = date('Y-m-01', current_time('timestamp'));
+        $month_end   = date('Y-m-t',  current_time('timestamp'));
+
+        // Helper lambdas
+        $count_views = function($where_sql, $params) use ($wpdb, $table) {
+            $q = $wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE {$where_sql}", $params);
+            return (int)$wpdb->get_var($q);
+        };
+
+        // Per IP per product per day
+        $cap = (int)($s['view_cap_per_ip_per_product_per_day'] ?? 0);
+        if ($cap > 0 && $ip_hash) {
+            $c = $count_views('product_id=%d AND view_date=%s AND ip_hash=%s', [$product_id, $from_day, $ip_hash]);
+            if ($c > $cap) return; // over cap → no pay
+        }
+        // Per IP per day sitewide
+        $cap = (int)($s['view_cap_per_ip_per_day_sitewide'] ?? 0);
+        if ($cap > 0 && $ip_hash) {
+            $c = $count_views('view_date=%s AND ip_hash=%s', [$from_day, $ip_hash]);
+            if ($c > $cap) return;
+        }
+        // Per viewer per day sitewide
+        $cap = (int)($s['view_cap_per_viewer_per_day_sitewide'] ?? 0);
+        if ($cap > 0) {
+            $c = $count_views('view_date=%s AND viewer_key=%s', [$from_day, $viewer_key]);
+            if ($c > $cap) return;
+        }
+        // Per product per day
+        $cap = (int)($s['view_cap_per_product_per_day'] ?? 0);
+        if ($cap > 0) {
+            $c = $count_views('view_date=%s AND product_id=%d', [$from_day, $product_id]);
+            if ($c > $cap) return;
+        }
+        // Per vendor per day
+        $cap = (int)($s['view_cap_per_vendor_per_day'] ?? 0);
+        if ($cap > 0) {
+            $c = $count_views('view_date=%s AND vendor_id=%d', [$from_day, $vendor_id]);
+            if ($c > $cap) return;
+        }
+        // Per vendor per month
+        $cap = (int)($s['view_cap_per_vendor_per_month'] ?? 0);
+        if ($cap > 0) {
+            $q = $wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE vendor_id=%d AND view_date BETWEEN %s AND %s", $vendor_id, $month_start, $month_end);
+            $c = (int)$wpdb->get_var($q);
+            if ($c > $cap) return;
+        }
+        // Sitewide per day
+        $cap = (int)($s['view_cap_sitewide_per_day'] ?? 0);
+        if ($cap > 0) {
+            $c = $count_views('view_date=%s', [$from_day]);
+            if ($c > $cap) return;
+        }
+        // Sitewide per month
+        $cap = (int)($s['view_cap_sitewide_per_month'] ?? 0);
+        if ($cap > 0) {
+            $q = $wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE view_date BETWEEN %s AND %s", $month_start, $month_end);
+            $c = (int)$wpdb->get_var($q);
+            if ($c > $cap) return;
+        }
+
+        // Payout € caps using ledger sums
+        $wallet = DS_Wallet::table();
+        $sum_amount = function($where_sql, $params) use ($wpdb, $wallet) {
+            $q = $wpdb->prepare("SELECT COALESCE(SUM(amount),0) FROM {$wallet} WHERE {$where_sql}", $params);
+            return (float)$wpdb->get_var($q);
+        };
+        // Vendor per day
+        $cap_e = (float)($s['payout_cap_per_vendor_per_day_eur'] ?? 0);
+        if ($cap_e > 0) {
+            $sum = $sum_amount("type='view_reward' AND status IN ('posted','paid') AND user_id=%d AND created_at BETWEEN %s AND %s", [$vendor_id, $from_day.' 00:00:00', $to_day.' 23:59:59']);
+            if ($sum + $rate > $cap_e + 1e-9) return;
+        }
+        // Vendor per month
+        $cap_e = (float)($s['payout_cap_per_vendor_per_month_eur'] ?? 0);
+        if ($cap_e > 0) {
+            $sum = $sum_amount("type='view_reward' AND status IN ('posted','paid') AND user_id=%d AND created_at BETWEEN %s AND %s", [$vendor_id, $month_start.' 00:00:00', $month_end.' 23:59:59']);
+            if ($sum + $rate > $cap_e + 1e-9) return;
+        }
+        // Sitewide per day
+        $cap_e = (float)($s['payout_cap_sitewide_per_day_eur'] ?? 0);
+        if ($cap_e > 0) {
+            $sum = $sum_amount("type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s", [$from_day.' 00:00:00', $to_day.' 23:59:59']);
+            if ($sum + $rate > $cap_e + 1e-9) return;
+        }
+        // Sitewide per month
+        $cap_e = (float)($s['payout_cap_sitewide_per_month_eur'] ?? 0);
+        if ($cap_e > 0) {
+            $sum = $sum_amount("type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s", [$month_start.' 00:00:00', $month_end.' 23:59:59']);
+            if ($sum + $rate > $cap_e + 1e-9) return;
+        }
+
+        // Idempotent ledger add using stable ref
+        $ref = 'view:' . $product_id . ':' . $today . ':' . $viewer_key;
+        $exists = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wallet} WHERE ref_id=%s", $ref));
+        if ($exists === 0) {
+            $meta = ['product_id'=>$product_id,'viewer_key'=>$viewer_key,'view_date'=>$today,'ip_hash'=>$ip_hash,'ua_hash'=>$ua_hash];
+            DS_Wallet::add($vendor_id, 'view_reward', $rate, $ref, 'posted', $meta);
+        }
     }
 
     static function viewer_key() : string {

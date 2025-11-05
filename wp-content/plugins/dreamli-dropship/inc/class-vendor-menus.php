@@ -9,6 +9,7 @@ final class DS_Vendor_Menus {
     static function menus() {
         if (!DS_Helpers::is_vendor()) return;
 
+        add_menu_page('Dashboard', 'Dashboard', 'read', 'ds-vendor-dashboard', [__CLASS__, 'dashboard_page'], 'dashicons-dashboard', 3);
         add_menu_page('کیف پول من', 'کیف پول من', 'read', 'ds-my-wallet', [__CLASS__, 'wallet_page'], 'dashicons-money', 4);
         add_menu_page('فروش‌های من', 'فروش‌های من', 'edit_products', 'ds-my-sales', [__CLASS__, 'sales_page'], 'dashicons-cart', 5);
         add_menu_page('پروموت محصولات', 'پروموت محصولات', 'edit_products', 'ds-promoted', [__CLASS__, 'ads_page'], 'dashicons-megaphone', 6);
@@ -302,6 +303,97 @@ final class DS_Vendor_Menus {
         DS_Leaderboard::render_filters($tab, $preset, $start, $end);
         DS_Leaderboard::render_table($rows, $tab, $paged, 50);
         echo '<p style="margin-top:12px;color:#666;">Views counted once per viewer per product per day. Time range: '.esc_html($start).' → '.esc_html($end).'</p>';
+        echo '</div>';
+    }
+
+    static function dashboard_page() {
+        if (!is_user_logged_in()) wp_die('No access.');
+        if (!DS_Helpers::is_vendor()) wp_die('No access.');
+        $uid = get_current_user_id();
+
+        $preset = isset($_GET['preset']) ? sanitize_key($_GET['preset']) : 'weekly';
+        $from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
+        $to   = isset($_GET['to']) ? sanitize_text_field($_GET['to']) : '';
+        list($start, $end) = DS_Leaderboard::get_period($preset, $from, $to);
+        $from_d = substr($start,0,10); $to_d = substr($end,0,10);
+
+        global $wpdb;
+        $vt = class_exists('DS_Views') ? DS_Views::table() : '';
+        $wt = DS_Wallet::table();
+
+        // KPIs
+        $views = $vt ? (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$vt} WHERE vendor_id=%d AND view_date BETWEEN %s AND %s", $uid, $from_d, $to_d)) : 0;
+        $view_eur = (float)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(amount),0) FROM {$wt} WHERE user_id=%d AND type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s", $uid, $start, $end));
+        $products_created = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type='product' AND post_status IN ('publish','private','draft','pending','future') AND post_author=%d AND post_date BETWEEN %s AND %s", $uid, $start, $end));
+        $wallet_balance = DS_Wallet::balance($uid);
+
+        // Optional orders KPI (if WooCommerce available)
+        $orders_count = 0; $orders_revenue = 0.0;
+        if (function_exists('wc_get_orders') && class_exists('DS_Orders')) {
+            $user_pids = DS_Orders::user_product_ids($uid);
+            if ($user_pids) {
+                $order_ids = DS_Orders::order_ids_containing_products($user_pids, 500);
+                if ($order_ids) {
+                    $orders = wc_get_orders(['include'=>$order_ids,'limit'=>-1,'return'=>'objects']);
+                    foreach ($orders as $order) {
+                        $dt = $order->get_date_created(); $ts = $dt ? $dt->getTimestamp() : 0;
+                        if ($ts && $ts >= strtotime($start) && $ts <= strtotime($end)) {
+                            $sum_vendor = 0.0; $has_item=false;
+                            foreach ($order->get_items('line_item') as $item) {
+                                $pid = $item->get_product_id() ?: $item->get_variation_id();
+                                if ($pid && in_array((int)$pid, $user_pids, true)) {
+                                    $sum_vendor += (float)$item->get_total();
+                                    $has_item = true;
+                                }
+                            }
+                            if ($has_item) { $orders_count++; $orders_revenue += $sum_vendor; }
+                        }
+                    }
+                }
+            }
+        }
+
+        echo '<div class="wrap">';
+        echo '<h1>Vendor Dashboard</h1>';
+        echo '<form method="get" style="margin:12px 0;">';
+        echo '<input type="hidden" name="page" value="ds-vendor-dashboard">';
+        echo '<label>Period: <select name="preset">';
+        foreach (['daily'=>'Daily','weekly'=>'Weekly','monthly'=>'Monthly','custom'=>'Custom'] as $k=>$lab) {
+            printf('<option value="%s" %s>%s</option>', esc_attr($k), selected($preset,$k,false), esc_html($lab));
+        }
+        echo '</select></label> ';
+        echo '<label>From: <input type="date" name="from" value="'.esc_attr($from_d).'"></label> ';
+        echo '<label>To: <input type="date" name="to" value="'.esc_attr($to_d).'"></label> ';
+        echo '<button class="button">Apply</button>';
+        echo '</form>';
+
+        echo '<div class="card" style="padding:12px;max-width:1100px;background:#fff;border:1px solid #e5e5e5;">';
+        printf('<p><b>Views:</b> %d &nbsp; | &nbsp; <b>View Earnings:</b> €%0.2f &nbsp; | &nbsp; <b>Products Created:</b> %d &nbsp; | &nbsp; <b>Orders:</b> %d &nbsp; | &nbsp; <b>Orders Revenue:</b> €%0.2f &nbsp; | &nbsp; <b>Wallet Balance:</b> €%0.2f</p>', $views, $view_eur, $products_created, $orders_count, $orders_revenue, $wallet_balance);
+        echo '</div>';
+
+        // Top products by views
+        if ($vt) {
+            $top_products = $wpdb->get_results($wpdb->prepare("SELECT product_id, COUNT(*) AS views FROM {$vt} WHERE vendor_id=%d AND view_date BETWEEN %s AND %s GROUP BY product_id ORDER BY views DESC LIMIT 10", $uid, $from_d, $to_d));
+            echo '<h2 style="margin-top:16px;">Top Products by Views</h2><table class="widefat striped"><thead><tr><th>Product</th><th>Views</th></tr></thead><tbody>';
+            if ($top_products) {
+                foreach ($top_products as $r) {
+                    $title = get_the_title((int)$r->product_id) ?: ('#'.(int)$r->product_id);
+                    printf('<tr><td>%s</td><td>%d</td></tr>', esc_html($title), (int)$r->views);
+                }
+            } else echo '<tr><td colspan="2">—</td></tr>';
+            echo '</tbody></table>';
+        }
+
+        // Latest view rewards
+        $latest = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$wt} WHERE user_id=%d AND type='view_reward' AND status IN ('posted','paid') AND created_at BETWEEN %s AND %s ORDER BY id DESC LIMIT 25", $uid, $start, $end));
+        echo '<h2 style="margin-top:16px;">Latest View Rewards</h2><table class="widefat striped"><thead><tr><th>ID</th><th>€</th><th>Ref</th><th>Created</th></tr></thead><tbody>';
+        if ($latest) {
+            foreach ($latest as $r) {
+                printf('<tr><td>%d</td><td>€%0.4f</td><td>%s</td><td>%s</td></tr>', (int)$r->id, (float)$r->amount, esc_html($r->ref_id), esc_html($r->created_at));
+            }
+        } else echo '<tr><td colspan="4">—</td></tr>';
+        echo '</tbody></table>';
+
         echo '</div>';
     }
 }

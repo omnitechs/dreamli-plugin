@@ -68,6 +68,7 @@ final class DS_Leaderboard {
                 'volume' => 0.0,
                 'products' => 0,
                 'views' => 0,
+                'view_earnings' => 0.0,
             ];
         }
         if (empty($rows)) return [];
@@ -89,6 +90,18 @@ final class DS_Leaderboard {
             $rows[$uid]['earned'] = round((float)$r->earned, 2);
             $rows[$uid]['spent']  = round((float)$r->spent, 2);
             $rows[$uid]['volume'] = round((float)$r->volume, 2);
+        }
+        // View earnings only (type=view_reward)
+        $q1b = $wpdb->prepare(
+            "SELECT user_id, SUM(amount) AS ve
+             FROM {$ledger_table}
+             WHERE status IN ('posted','paid') AND type='view_reward' AND created_at BETWEEN %s AND %s
+             GROUP BY user_id",
+            $from, $to
+        );
+        foreach ($wpdb->get_results($q1b) as $r) {
+            $uid = (int)$r->user_id; if (!isset($rows[$uid])) continue;
+            $rows[$uid]['view_earnings'] = round((float)$r->ve, 2);
         }
 
         // Products created in period
@@ -135,6 +148,7 @@ final class DS_Leaderboard {
             'volume' => 'Transactions Volume',
             'products' => 'Products Created',
             'views' => 'Product Views',
+            'view_earnings' => 'View Earnings',
         ];
         echo '<h2 class="nav-tab-wrapper">';
         foreach ($tabs as $k=>$label) {
@@ -162,7 +176,7 @@ final class DS_Leaderboard {
 
     public static function render_table($rows, $active_tab, $paged = 1, $per_page = 50) {
         // Sort by active tab desc
-        $key = in_array($active_tab, ['earned','spent','volume','products','views'], true) ? $active_tab : 'earned';
+        $key = in_array($active_tab, ['earned','spent','volume','products','views','view_earnings'], true) ? $active_tab : 'earned';
         usort($rows, function($a,$b) use($key){
             $va = $a[$key] ?? 0; $vb = $b[$key] ?? 0; if ($va==$vb) return 0; return ($va<$vb)?1:-1; // desc
         });
@@ -173,7 +187,7 @@ final class DS_Leaderboard {
         $slice = array_slice($rows, $offset, $per_page);
 
         echo '<table class="widefat striped"><thead><tr>'
-            .'<th>#</th><th>User</th><th>Made (+)</th><th>Spent (-)</th><th>Volume</th><th>Products</th><th>Views</th>'
+            .'<th>#</th><th>User</th><th>Made (+)</th><th>Spent (-)</th><th>Volume</th><th>Products</th><th>Views</th><th>View Earnings (€)</th>'
             .'</tr></thead><tbody>';
         $i = $offset + 1;
         foreach ($slice as $r) {
@@ -185,12 +199,13 @@ final class DS_Leaderboard {
                 .'<td>€%0.2f</td>'
                 .'<td>%d</td>'
                 .'<td>%d</td>'
+                .'<td>€%0.2f</td>'
                 .'</tr>',
                 $i++, esc_html($r['display_name'].' (@'.$r['username'].')'),
-                (float)$r['earned'], (float)$r['spent'], (float)$r['volume'], (int)$r['products'], (int)$r['views']
+                (float)$r['earned'], (float)$r['spent'], (float)$r['volume'], (int)$r['products'], (int)$r['views'], (float)($r['view_earnings'] ?? 0)
             );
         }
-        if (!$slice) echo '<tr><td colspan="7">No data for selected period.</td></tr>';
+        if (!$slice) echo '<tr><td colspan="8">No data for selected period.</td></tr>';
         echo '</tbody></table>';
 
         // Pagination

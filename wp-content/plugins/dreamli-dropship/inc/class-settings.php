@@ -49,6 +49,30 @@ final class DS_Settings {
             // --- Wallet
             'withdraw_min' => 1.00,
 
+            // --- View Payouts and Caps
+            'enable_view_payouts' => 0,
+            'view_payout_rate_eur' => 0.01,
+            // Count caps (0 = disabled)
+            'view_cap_per_ip_per_product_per_day' => 3,
+            'view_cap_per_ip_per_day_sitewide'    => 50,
+            'view_cap_per_viewer_per_day_sitewide'=> 20,
+            'view_cap_per_product_per_day'        => 2000,
+            'view_cap_per_vendor_per_day'         => 5000,
+            'view_cap_per_vendor_per_month'       => 100000,
+            'view_cap_sitewide_per_day'           => 50000,
+            'view_cap_sitewide_per_month'         => 1500000,
+            // Payout € caps
+            'payout_cap_per_vendor_per_day_eur'   => 200.00,
+            'payout_cap_per_vendor_per_month_eur' => 5000.00,
+            'payout_cap_sitewide_per_day_eur'     => 2000.00,
+            'payout_cap_sitewide_per_month_eur'   => 50000.00,
+            // Bot/exclusion controls
+            'view_ua_denylist' => ['bot','crawler','spider','headless','monitoring'],
+            'view_pay_for_bots' => 0,
+            'view_record_bots'  => 1,
+            'view_excluded_vendors'  => [],
+            'view_excluded_products' => [],
+
             // --- Calculator (reserved)
             'calc_mode' => 'linear',
             'calc_base' => 2.00,
