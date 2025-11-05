@@ -28,6 +28,8 @@ require_once DS_PLUGIN_DIR . 'inc/class-pricing.php';
 require_once DS_PLUGIN_DIR . 'inc/class-material-options.php';
 require_once DS_PLUGIN_DIR . 'inc/class-ai-product-seo.php';
 require_once DS_PLUGIN_DIR . 'inc/class-ads.php';
+require_once DS_PLUGIN_DIR . 'inc/class-views.php';
+require_once DS_PLUGIN_DIR . 'inc/class-leaderboard.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -43,6 +45,10 @@ register_activation_hook(__FILE__, function () {
 	// Create Ads table (CPC campaigns)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads', 'install')) {
 		DS_Ads::install();
+	}
+	// Create Product Views table
+	if (class_exists('DS_Views') && method_exists('DS_Views','install')) {
+		DS_Views::install();
 	}
 });
 
@@ -61,9 +67,14 @@ add_action('plugins_loaded', function () {
 	DS_Material_Options::init();
 	DS_AI_Product_SEO::init();
 	DS_Ads::init();
+	DS_Views::init();
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }
+	}
+	// Ensure Views table exists on updates
+	if (class_exists('DS_Views') && method_exists('DS_Views','table') && method_exists('DS_Views','install')) {
+		if (!DS_Helpers::db_table_exists(DS_Views::table())) { DS_Views::install(); }
 	}
 
 });

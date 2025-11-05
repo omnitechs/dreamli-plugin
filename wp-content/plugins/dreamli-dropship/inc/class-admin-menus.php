@@ -22,6 +22,7 @@ final class DS_Admin_Menus {
         add_submenu_page('ds-root','Settings','Settings','manage_options','ds-settings',[__CLASS__,'settings']);
         add_submenu_page('ds-root','Ledger','Ledger','manage_options','ds-ledger',[__CLASS__,'ledger']);
         add_submenu_page('ds-root','Orders Report','Orders Report','manage_options','ds-orders-report',[__CLASS__,'orders_report']);
+        add_submenu_page('ds-root','Leaderboard','Leaderboard','manage_options','ds-leaderboard-admin',[__CLASS__,'leaderboard']);
     }
 
     static function root() {
@@ -343,6 +344,25 @@ final class DS_Admin_Menus {
         $next = add_query_arg(['paged'=>$paged+1], admin_url('admin.php?page=ds-orders-report'));
         $prev = add_query_arg(['paged'=>max(1,$paged-1)], admin_url('admin.php?page=ds-orders-report'));
         echo '<p style="margin:12px;"><a class="button" href="'.esc_url($prev).'">Prev</a> <a class="button" href="'.esc_url($next).'">Next</a></p>';
+        echo '</div>';        
+    }
+
+    static function leaderboard() {
+        if (!current_user_can('manage_options')) wp_die('No access.');
+        $tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'earned';
+        $preset = isset($_GET['preset']) ? sanitize_key($_GET['preset']) : 'weekly';
+        $from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
+        $to   = isset($_GET['to']) ? sanitize_text_field($_GET['to']) : '';
+        $paged = max(1, intval($_GET['paged'] ?? 1));
+
+        list($start, $end) = DS_Leaderboard::get_period($preset, $from, $to);
+        $rows = DS_Leaderboard::aggregate($start, $end);
+
+        echo '<div class="wrap">';
+        echo '<h1>Leaderboard</h1>';
+        DS_Leaderboard::render_filters($tab, $preset, $start, $end);
+        DS_Leaderboard::render_table($rows, $tab, $paged, 50);
+        echo '<p style="margin-top:12px;color:#666;">Views counted once per viewer per product per day. Time range: '.esc_html($start).' → '.esc_html($end).'</p>';
         echo '</div>';
     }
 }

@@ -12,6 +12,7 @@ final class DS_Vendor_Menus {
         add_menu_page('کیف پول من', 'کیف پول من', 'read', 'ds-my-wallet', [__CLASS__, 'wallet_page'], 'dashicons-money', 4);
         add_menu_page('فروش‌های من', 'فروش‌های من', 'edit_products', 'ds-my-sales', [__CLASS__, 'sales_page'], 'dashicons-cart', 5);
         add_menu_page('پروموت محصولات', 'پروموت محصولات', 'edit_products', 'ds-promoted', [__CLASS__, 'ads_page'], 'dashicons-megaphone', 6);
+        add_menu_page('Leaderboard', 'Leaderboard', 'read', 'ds-leaderboard', [__CLASS__, 'leaderboard_page'], 'dashicons-chart-bar', 7);
     }
 
     static function ads_page() {
@@ -280,6 +281,27 @@ final class DS_Vendor_Menus {
             }
             echo '</p>';
         }
+        echo '</div>';
+    }
+
+    static function leaderboard_page() {
+        if (!is_user_logged_in()) wp_die('No access.');
+        if (!DS_Helpers::is_vendor()) wp_die('No access.');
+
+        $tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'earned';
+        $preset = isset($_GET['preset']) ? sanitize_key($_GET['preset']) : 'weekly';
+        $from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
+        $to   = isset($_GET['to']) ? sanitize_text_field($_GET['to']) : '';
+        $paged = max(1, intval($_GET['paged'] ?? 1));
+
+        list($start, $end) = DS_Leaderboard::get_period($preset, $from, $to);
+        $rows = DS_Leaderboard::aggregate($start, $end);
+
+        echo '<div class="wrap">';
+        echo '<h1>Leaderboard</h1>';
+        DS_Leaderboard::render_filters($tab, $preset, $start, $end);
+        DS_Leaderboard::render_table($rows, $tab, $paged, 50);
+        echo '<p style="margin-top:12px;color:#666;">Views counted once per viewer per product per day. Time range: '.esc_html($start).' → '.esc_html($end).'</p>';
         echo '</div>';
     }
 }
