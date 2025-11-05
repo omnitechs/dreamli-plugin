@@ -518,6 +518,7 @@ final class DS_AI_Product_SEO {
         if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); self::mark_failed($run_id,'no_category'); return; }
         if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   self::mark_failed($run_id,'no_images'); return; }
         self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws=' . (!empty($ctx['keywords']) ? 1 : 0));
+        self::log($run_id,'Category URL: ' . (!empty($ctx['category_url']) ? $ctx['category_url'] : '[none]'));
 
         // Messages
         self::log($run_id,'Building messages…');
@@ -530,6 +531,9 @@ final class DS_AI_Product_SEO {
                 "product_category" => $ctx['primary_cat_name'],
                 "keywords"         => $ctx['keywords'],
                 "note"             => "Images attached below. Analysis allowed."
+            ],
+            "INTERNAL LINKS (Optional)" => [
+                "category_url" => $ctx['category_url'] ?? ''
             ],
             "EXTERNAL LINK (Optional)" => $ctx['external_link'],
             "USER EXPERIENCE INPUT (Optional)" => $ctx['story'] ?: ''
@@ -576,6 +580,7 @@ final class DS_AI_Product_SEO {
                . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
                . 'Place ALL HTML only inside long_description_html. Do not output any HTML anywhere else. '
                . 'Use internal links only if they are present in the provided context via tools (vector store or web search). Do not invent URLs. '
+               . 'If a valid category_url is provided in inputs, include up to 2 internal links using exactly that URL: one in Product Details and one in CTA, with varied anchor text. '
                . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
                . 'If an external link is provided, you may include it naturally up to 1–2 times. '
                . 'Keep links HTML with <a href="...">...</a>.\n\n'
@@ -737,7 +742,10 @@ final class DS_AI_Product_SEO {
             'post_excerpt'=> wp_kses_post($data['short_description'] ?? ''),
             'post_content'=> wp_kses_post($data['long_description_html'] ?? '')
         ];
-        if (!empty($data['slug'])) $update['post_name'] = sanitize_title($data['slug']);
+        $raw_slug = isset($data['slug']) ? (string)$data['slug'] : '';
+        $norm_slug = self::normalize_slug($raw_slug !== '' ? $raw_slug : $post->post_title);
+        if ($raw_slug !== '') self::log($run_id, 'Slug normalized: "'.$raw_slug.'" -> "'.$norm_slug.'"');
+        if (!empty($norm_slug)) $update['post_name'] = $norm_slug;
         wp_update_post($update);
 
         update_post_meta($post_id, 'rank_math_title', sanitize_text_field($data['meta_title'] ?? ''));
@@ -851,6 +859,19 @@ final class DS_AI_Product_SEO {
             }
         }
 
+        // Category URL (optional)
+        $category_url = '';
+        if ($has_cat) {
+            $term0 = $cat_terms[0];
+            $meta_url = (string) get_term_meta($term0->term_id, 'ds_cat_url', true);
+            if (!empty($meta_url)) {
+                $category_url = $meta_url;
+            } else {
+                $link = get_term_link($term0, 'product_cat');
+                if (!is_wp_error($link)) $category_url = $link;
+            }
+        }
+
         // External link (optional)
         $external_link = get_post_meta($post_id, '_ds_ai_external_url', true);
 
@@ -884,6 +905,7 @@ final class DS_AI_Product_SEO {
             'cat_names'        => $cat_names,
             'primary_cat_name' => $primary,
             'keywords'         => $keywords,
+            'category_url'     => $category_url,
             'external_link'    => $external_link,
             'story'            => $story,
             'has_images'       => !empty($img_urls),
@@ -1012,6 +1034,48 @@ final class DS_AI_Product_SEO {
             $tags['li'] = [];
         }
         return $tags;
+    }
+
+    /* ===================== Slug normalization ===================== */
+    private static function normalize_slug($raw){
+        $s = trim((string)$raw);
+        if ($s === '') return '';
+        $candidate = $s;
+        // Extract from query string like ?product=foo-bar
+        if (strpos($candidate, '?') !== false) {
+            $q = substr($candidate, strpos($candidate, '?') + 1);
+            if (is_string($q) && $q !== '') {
+                parse_str($q, $arr);
+                if (isset($arr['product']) && is_string($arr['product']) && $arr['product'] !== '') {
+                    $candidate = $arr['product'];
+                }
+            }
+        }
+        // If still a URL, try to derive slug from URL components
+        if (filter_var($candidate, FILTER_VALIDATE_URL)) {
+            $p = wp_parse_url($candidate);
+            if (isset($p['query'])) {
+                parse_str($p['query'], $arr2);
+                if (!empty($arr2['product'])) {
+                    $candidate = (string)$arr2['product'];
+                }
+            }
+            if ($candidate === $s || strpos($candidate, '/') !== false) {
+                if (!empty($p['path'])) {
+                    $base = basename($p['path']);
+                    if ($base !== '' && $base !== false) {
+                        $candidate = $base;
+                    }
+                }
+            }
+        }
+        // Drop extension if present
+        $candidate = preg_replace('/\.[a-z0-9]+$/i', '', (string)$candidate);
+        // Fallback to product title if nothing usable
+        if ($candidate === '' || $candidate === '/' || $candidate === '?') {
+            return '';
+        }
+        return sanitize_title($candidate);
     }
 
     /* ===================== Direct spawn helpers ===================== */
