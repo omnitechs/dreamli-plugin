@@ -23,6 +23,7 @@ final class DS_Admin_Menus {
         add_submenu_page('ds-root','Ledger','Ledger','manage_options','ds-ledger',[__CLASS__,'ledger']);
         add_submenu_page('ds-root','Orders Report','Orders Report','manage_options','ds-orders-report',[__CLASS__,'orders_report']);
         add_submenu_page('ds-root','Leaderboard','Leaderboard','manage_options','ds-leaderboard-admin',[__CLASS__,'leaderboard']);
+        add_submenu_page('ds-root','Entitlements Manager','Entitlements Manager','manage_options','ds-entitlements-manager',[__CLASS__,'entitlements_manager']);
         add_submenu_page('ds-root','Dashboard','Dashboard','manage_options','ds-dashboard',[__CLASS__,'dashboard']);
     }
 
@@ -37,7 +38,7 @@ final class DS_Admin_Menus {
 
             $fields = [
                 // Moderation
-                'posts_pending','products_pending',
+                'posts_pending','products_pending','vendor_admin_publish_reward_eur',
 
                 // Curated credit
                 'curated_credit_enable','curated_credit_amount','credit_min_images','credit_min_words','credit_min_rankmath',
@@ -47,6 +48,14 @@ final class DS_Admin_Menus {
 
                 // Wallet
                 'withdraw_min',
+
+                // Entitlements (monthly)
+                'entitlements_enable','entitlement_fee_eur','entitlement_confirm_days','pool_user_id',
+                // Entitlement routing/protections
+                'entitlement_controls_payouts_ads','pause_payouts_while_pending','ads_autopause_on_entitlement_loss',
+
+                // Claim & Re-claim dynamic fees
+                'claim_fee_enable','entitlement_dynamic_fee_enable','claim_fee_period','claim_fee_price_basis','claim_fee_denominator_scope','claim_fee_min_pct','claim_fee_max_pct','claim_fee_min_eur','claim_fee_cache_minutes','claim_fee_statuses',
 
                 // View payouts settings
                 'enable_view_payouts','view_payout_rate_eur',
@@ -58,6 +67,12 @@ final class DS_Admin_Menus {
 
                 // Ads CPC
                 'ads_cpc_home','ads_cpc_category',
+
+                // Protections: product completeness/status
+                'protect_status_demotion','require_featured_image','require_product_category','min_title_len','min_content_len',
+
+                // Snapshots
+                'snapshot_retention_days',
 
                 // Product Options integration
                 'po_meta_key','po_type_field_main_id','po_type_field_secondary_id',
@@ -79,7 +94,10 @@ final class DS_Admin_Menus {
                     if (in_array($f, [
                         'posts_pending','products_pending',
                         'curated_credit_enable','calc_round_cents','calc_custom_expr_enable',
-                        'enable_view_payouts','view_pay_for_bots','view_record_bots'
+                        'enable_view_payouts','view_pay_for_bots','view_record_bots',
+                        'entitlements_enable','entitlement_controls_payouts_ads','pause_payouts_while_pending','ads_autopause_on_entitlement_loss',
+                        'protect_status_demotion','require_featured_image','require_product_category',
+                        'claim_fee_enable','entitlement_dynamic_fee_enable'
                     ], true)) {
                         $new[$f] = 0;
                     }
@@ -88,7 +106,7 @@ final class DS_Admin_Menus {
 
                 $val = $_POST[$f];
 
-                if (in_array($f, ['posts_pending','products_pending','curated_credit_enable','calc_round_cents','calc_custom_expr_enable','enable_view_payouts','view_pay_for_bots','view_record_bots'], true)) {
+                if (in_array($f, ['posts_pending','products_pending','curated_credit_enable','calc_round_cents','calc_custom_expr_enable','enable_view_payouts','view_pay_for_bots','view_record_bots','entitlements_enable','entitlement_controls_payouts_ads','pause_payouts_while_pending','ads_autopause_on_entitlement_loss','protect_status_demotion','require_featured_image','require_product_category'], true)) {
                     $new[$f] = (int) !!$val;
 
                 } elseif ($f === 'calc_mode') {
@@ -142,6 +160,11 @@ final class DS_Admin_Menus {
                 $ids = array_values(array_filter(array_map('intval', preg_split('/[\s,;]+/', (string)$_POST['view_excluded_products']))));
                 $new['view_excluded_products'] = $ids;
             }
+            if (isset($_POST['claim_fee_statuses'])) {
+                $st = is_array($_POST['claim_fee_statuses']) ? $_POST['claim_fee_statuses'] : explode(',', (string)$_POST['claim_fee_statuses']);
+                $st = array_values(array_filter(array_map(function($s){ return strtolower(trim(sanitize_text_field($s))); }, $st)));
+                $new['claim_fee_statuses'] = $st;
+            }
 
             DS_Settings::update($new);
             echo '<div class="notice notice-success"><p>Settings saved.</p></div>';
@@ -161,6 +184,7 @@ final class DS_Admin_Menus {
             <h2>Moderation</h2>
             <p><label><input type="checkbox" name="posts_pending" value="1" <?php checked($s['posts_pending']); ?>> Vendor blog posts → <b>Pending</b></label></p>
             <p><label><input type="checkbox" name="products_pending" value="1" <?php checked($s['products_pending']); ?>> Vendor products → <b>Pending</b></label></p>
+            <p>Vendor Admin publish reward (€): <input type="number" step="0.01" min="0" name="vendor_admin_publish_reward_eur" value="<?php echo esc_attr($s['vendor_admin_publish_reward_eur']); ?>"> <small>Paid to Vendor Admin when they publish another users pending product.</small></p>
 
             <h2 style="margin-top:24px;">Curated Credit</h2>
             <p><label><input type="checkbox" name="curated_credit_enable" value="1" <?php checked($s['curated_credit_enable']); ?>> Enable € credit on first publish</label></p>
@@ -173,6 +197,51 @@ final class DS_Admin_Menus {
 
             <h2 style="margin-top:24px;">Wallet / Payouts</h2>
             <p>Minimum withdrawal (€): <input type="number" step="0.01" name="withdraw_min" value="<?php echo esc_attr($s['withdraw_min']); ?>"></p>
+
+            <h2 style="margin-top:24px;">Entitlements (Monthly Ownership)</h2>
+            <p><label><input type="checkbox" name="entitlements_enable" value="1" <?php checked($s['entitlements_enable']); ?>> Enable monthly entitlements</label></p>
+            <p>Fee per product below mean (€): <input type="number" step="0.01" min="0" name="entitlement_fee_eur" value="<?php echo esc_attr($s['entitlement_fee_eur']); ?>">
+               &nbsp; Confirmation window (days): <input type="number" step="1" min="1" name="entitlement_confirm_days" value="<?php echo esc_attr($s['entitlement_confirm_days']); ?>">
+               &nbsp; Pool User ID: <input type="number" step="1" min="1" name="pool_user_id" value="<?php echo esc_attr($s['pool_user_id']); ?>">
+            </p>
+            <div style="background:#fff;border:1px solid #eee;padding:10px;max-width:900px;">
+              <p><label><input type="checkbox" name="entitlement_controls_payouts_ads" value="1" <?php checked($s['entitlement_controls_payouts_ads']); ?>> Entitlement governs view payouts and CPC rights (recommended)</label></p>
+              <p><label><input type="checkbox" name="pause_payouts_while_pending" value="1" <?php checked($s['pause_payouts_while_pending']); ?>> Pause view payouts while entitlement is pending (still records views)</label></p>
+              <p><label><input type="checkbox" name="ads_autopause_on_entitlement_loss" value="1" <?php checked($s['ads_autopause_on_entitlement_loss']); ?>> Auto‑pause CPC campaigns when entitlement is lost (pool/claimed)</label></p>
+            </div>
+
+            <h2 style="margin-top:24px;">Claim &amp; Re-claim Fees</h2>
+            <div style="background:#fff;border:1px solid #eee;padding:10px;max-width:900px;">
+              <p><label><input type="checkbox" name="claim_fee_enable" value="1" <?php checked($s['claim_fee_enable']); ?>> Require payment to claim pooled products (dynamic, based on average sales)</label></p>
+              <p><label><input type="checkbox" name="entitlement_dynamic_fee_enable" value="1" <?php checked($s['entitlement_dynamic_fee_enable']); ?>> Use the same dynamic model for monthly underperformance fee (replaces fixed €2)</label></p>
+              <p>Period:
+                <select name="claim_fee_period">
+                  <option value="rolling_30d" <?php selected($s['claim_fee_period'],'rolling_30d'); ?>>Rolling 30 days</option>
+                  <option value="month_to_date" <?php selected($s['claim_fee_period'],'month_to_date'); ?>>Month-to-date</option>
+                  <option value="previous_month" <?php selected($s['claim_fee_period'],'previous_month'); ?>>Previous month</option>
+                </select>
+                &nbsp; Price basis:
+                <select name="claim_fee_price_basis">
+                  <option value="current" <?php selected($s['claim_fee_price_basis'],'current'); ?>>Current price</option>
+                  <option value="regular" <?php selected($s['claim_fee_price_basis'],'regular'); ?>>Regular price</option>
+                  <option value="sale" <?php selected($s['claim_fee_price_basis'],'sale'); ?>>Sale price</option>
+                </select>
+              </p>
+              <p>Denominator scope:
+                <select name="claim_fee_denominator_scope">
+                  <option value="published" <?php selected($s['claim_fee_denominator_scope'],'published'); ?>>Published only</option>
+                  <option value="published_private" <?php selected($s['claim_fee_denominator_scope'],'published_private'); ?>>Published + Private</option>
+                  <option value="all" <?php selected($s['claim_fee_denominator_scope'],'all'); ?>>All (incl. pending/draft)</option>
+                </select>
+              </p>
+              <?php $st_csv = is_array($s['claim_fee_statuses']) ? implode(', ', array_map('sanitize_text_field',$s['claim_fee_statuses'])) : (string)$s['claim_fee_statuses']; ?>
+              <p>Count orders with statuses (CSV, e.g., processing, completed): <input type="text" name="claim_fee_statuses" value="<?php echo esc_attr($st_csv); ?>" style="width:360px;"></p>
+              <p>Min percent: <input type="number" step="0.01" min="0" max="100" name="claim_fee_min_pct" value="<?php echo esc_attr($s['claim_fee_min_pct']); ?>">
+                 &nbsp; Max percent: <input type="number" step="0.01" min="0" max="100" name="claim_fee_max_pct" value="<?php echo esc_attr($s['claim_fee_max_pct']); ?>">
+                 &nbsp; Min fee (€): <input type="number" step="0.01" min="0" name="claim_fee_min_eur" value="<?php echo esc_attr($s['claim_fee_min_eur']); ?>">
+                 &nbsp; Cache (min): <input type="number" step="1" min="1" name="claim_fee_cache_minutes" value="<?php echo esc_attr($s['claim_fee_cache_minutes']); ?>">
+              </p>
+            </div>
 
             <h2 style="margin-top:24px;">View Payouts</h2>
             <p><label><input type="checkbox" name="enable_view_payouts" value="1" <?php checked($s['enable_view_payouts']); ?>> Enable paying per unique view (EUR)</label></p>
@@ -210,6 +279,15 @@ final class DS_Admin_Menus {
             <?php $ex_v_csv = is_array($s['view_excluded_vendors']) ? implode(',', array_map('intval',$s['view_excluded_vendors'])) : (string)$s['view_excluded_vendors']; ?>
             <?php $ex_p_csv = is_array($s['view_excluded_products']) ? implode(',', array_map('intval',$s['view_excluded_products'])) : (string)$s['view_excluded_products']; ?>
             <p>Exclude Vendor IDs (CSV): <input type="text" name="view_excluded_vendors" value="<?php echo esc_attr($ex_v_csv); ?>" style="width:300px;"> &nbsp; Exclude Product IDs (CSV): <input type="text" name="view_excluded_products" value="<?php echo esc_attr($ex_p_csv); ?>" style="width:300px;"></p>
+
+            <h2 style="margin-top:24px;">Vendor Protections</h2>
+            <p><label><input type="checkbox" name="protect_status_demotion" value="1" <?php checked($s['protect_status_demotion']); ?>> Prevent vendors from demoting published products (publish → draft/private)</label></p>
+            <p><label><input type="checkbox" name="require_featured_image" value="1" <?php checked($s['require_featured_image']); ?>> Require featured image</label>
+               &nbsp; <label><input type="checkbox" name="require_product_category" value="1" <?php checked($s['require_product_category']); ?>> Require at least one category</label></p>
+            <p>Minimum title length: <input type="number" step="1" min="0" name="min_title_len" value="<?php echo esc_attr($s['min_title_len']); ?>"> &nbsp; Minimum content length: <input type="number" step="1" min="0" name="min_content_len" value="<?php echo esc_attr($s['min_content_len']); ?>"></p>
+
+            <h2 style="margin-top:24px;">Snapshots (Backup & Restore)</h2>
+            <p>Retention (days): <input type="number" step="1" min="1" name="snapshot_retention_days" value="<?php echo esc_attr($s['snapshot_retention_days']); ?>"> <small>Older snapshots are removed daily.</small></p>
 
             <h2 style="margin-top:24px;">Promoted Products (CPC)</h2>
             <p>Cost per click – Home (€): <input type="number" step="0.01" name="ads_cpc_home" value="<?php echo esc_attr($s['ads_cpc_home']); ?>">
@@ -425,6 +503,132 @@ final class DS_Admin_Menus {
         DS_Leaderboard::render_filters($tab, $preset, $start, $end);
         DS_Leaderboard::render_table($rows, $tab, $paged, 50);
         echo '<p style="margin-top:12px;color:#666;">Views counted once per viewer per product per day. Time range: '.esc_html($start).' → '.esc_html($end).'</p>';
+        echo '</div>';
+    }
+
+    static function entitlements_manager() {
+        if (!current_user_can('manage_options')) wp_die('No access.');
+        $q = isset($_GET['q']) ? sanitize_text_field($_GET['q']) : '';
+        $paged = max(1, intval($_GET['paged'] ?? 1));
+        $per_page = 25;
+        $args = [
+            'post_type' => 'product',
+            'posts_per_page' => $per_page,
+            'paged' => $paged,
+            'post_status' => ['publish','private','pending','draft','future'],
+            'orderby' => 'date',
+            'order' => 'DESC',
+        ];
+        if ($q !== '') { $args['s'] = $q; }
+        $query = new WP_Query($args);
+        $posts = $query->posts;
+        $total = (int)$query->found_posts;
+        $pages = max(1, (int)ceil($total / $per_page));
+
+        echo '<div class="wrap">';
+        echo '<h1>Entitlements Manager</h1>';
+        echo '<form method="get" style="margin:12px 0;">';
+        echo '<input type="hidden" name="page" value="ds-entitlements-manager">';
+        echo '<input type="text" name="q" value="'.esc_attr($q).'" placeholder="Search products by title/keyword" style="width:320px;"> ';
+        echo '<button class="button">Search</button>';
+        echo '</form>';
+
+        if (isset($_GET['bulk_done'])) {
+            $msg = sprintf('Bulk "%s" done for %d item(s).', esc_html($_GET['bulk_done']), intval($_GET['bulk_count'] ?? 0));
+            echo '<div class="notice notice-success"><p>'.esc_html($msg).'</p></div>';
+        }
+
+        echo '<table class="widefat striped"><thead><tr><th>ID</th><th>Product</th><th>Holder</th><th>Pool</th><th>Last Month</th><th>Actions</th></tr></thead><tbody>';
+        if ($posts) {
+            global $wpdb; $t = class_exists('DS_Entitlements') ? DS_Entitlements::table() : '';
+            $prev_month = date('Y-m', strtotime('-1 month', current_time('timestamp')));
+            foreach ($posts as $p) {
+                $pid = (int)$p->ID;
+                $title = get_the_title($pid) ?: ('#'.$pid);
+                $holder = class_exists('DS_Entitlements') ? (int)DS_Entitlements::current_holder($pid) : (int)$p->post_author;
+                $holder_name = $holder ? ( ($u=get_userdata($holder)) ? $u->display_name : ('#'.$holder) ) : '-';
+                $override = (int) get_post_meta($pid, '_ds_entitlement_override_user', true);
+                $in_pool = (int) get_post_meta($pid, '_ds_pool', true) === 1;
+                $row = $t ? $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE product_id=%d AND month=%s", $pid, $prev_month)) : null;
+                $lm = $row ? sprintf('v:%d / mean:%0.2f / fee:€%0.2f / %s', (int)$row->views, (float)$row->mean_views, (float)$row->amount_due, esc_html($row->status)) : '—';
+
+                echo '<tr>';
+                echo '<td>'.(int)$pid.'</td>';
+                echo '<td><a href="'.esc_url(get_edit_post_link($pid)).'">'.esc_html($title).'</a></td>';
+                echo '<td>'.esc_html($holder_name).($override?' <span style="color:#d63638;">(override)</span>':'').'</td>';
+                echo '<td>'.($in_pool?'<span style="color:#d63638;">Yes</span>':'No').'</td>';
+                echo '<td>'.esc_html($lm).'</td>';
+                echo '<td>';
+                // Info: current claim fee
+                if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','claim_fee_breakdown')) {
+                    $bd = DS_Entitlements::claim_fee_breakdown($pid);
+                    $fee_t = '€'.number_format((float)($bd['amount'] ?? 0),2).' ('.number_format((float)($bd['percent'] ?? 0),2).'%)';
+                    echo '<div style="color:#666;margin-bottom:6px;">Claim fee now: '.esc_html($fee_t).'</div>';
+                }
+                // Override set
+                echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
+                echo '<input type="hidden" name="action" value="ds_entitlement_override_set">';
+                echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
+                echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
+                echo '<input type="number" name="user_id" min="1" placeholder="User ID" style="width:100px;"> ';
+                echo '<button class="button">Set</button>';
+                echo '</form>';
+                // Clear override
+                echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
+                echo '<input type="hidden" name="action" value="ds_entitlement_override_clear">';
+                echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
+                echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
+                echo '<button class="button">Clear</button>';
+                echo '</form>';
+                // Pool send/remove
+                if (!$in_pool) {
+                    echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
+                    echo '<input type="hidden" name="action" value="ds_pool_send">';
+                    echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
+                    echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
+                    echo '<button class="button">Send to Pool</button>';
+                    echo '</form>';
+                } else {
+                    echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
+                    echo '<input type="hidden" name="action" value="ds_pool_remove">';
+                    echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
+                    echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
+                    echo '<input type="number" name="user_id" min="1" placeholder="Restore User ID" style="width:120px;"> ';
+                    echo '<button class="button">Remove from Pool</button>';
+                    echo '</form>';
+                }
+                echo '</td>';
+                echo '</tr>';
+            }
+        } else {
+            echo '<tr><td colspan="6">No products found.</td></tr>';
+        }
+        echo '</tbody></table>';
+
+        // Pagination
+        if ($pages > 1) {
+            echo '<p style="margin:12px 0;">';
+            for ($i=1;$i<=$pages;$i++){
+                $u = add_query_arg(['page'=>'ds-entitlements-manager','q'=>$q,'paged'=>$i], admin_url('admin.php'));
+                echo $i===$paged ? '<span class="button button-primary" style="margin-right:6px;">'.$i.'</span>' : '<a class="button" style="margin-right:6px;" href="'.esc_url($u).'">'.$i.'</a>';
+            }
+            echo '</p>';
+        }
+
+        echo '<h2 style="margin-top:24px;">Bulk tools</h2>';
+        echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="max-width:820px;background:#fff;border:1px solid #eee;padding:12px;">';
+        echo wp_nonce_field('ds_ent_bulk', '_wpnonce', true, false);
+        echo '<input type="hidden" name="action" value="ds_entitlements_bulk">';
+        echo '<p><select name="bulk_action">';
+        echo '<option value="set_override">Set override holder</option>';
+        echo '<option value="clear_override">Clear override</option>';
+        echo '<option value="send_pool">Send to Pool</option>';
+        echo '<option value="remove_pool">Remove from Pool</option>';
+        echo '</select> &nbsp; Target User ID (for set/remove): <input type="number" name="user_id" min="1" style="width:120px;"></p>';
+        echo '<p>Product IDs (comma or space separated):<br><textarea name="product_ids" rows="3" style="width:100%;"></textarea></p>';
+        echo '<p><button class="button button-primary">Run</button></p>';
+        echo '</form>';
+
         echo '</div>';
     }
 

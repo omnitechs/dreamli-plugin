@@ -30,6 +30,8 @@ require_once DS_PLUGIN_DIR . 'inc/class-ai-product-seo.php';
 require_once DS_PLUGIN_DIR . 'inc/class-ads.php';
 require_once DS_PLUGIN_DIR . 'inc/class-views.php';
 require_once DS_PLUGIN_DIR . 'inc/class-leaderboard.php';
+require_once DS_PLUGIN_DIR . 'inc/class-entitlements.php';
+require_once DS_PLUGIN_DIR . 'inc/class-snapshots.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -50,6 +52,14 @@ register_activation_hook(__FILE__, function () {
 	if (class_exists('DS_Views') && method_exists('DS_Views','install')) {
 		DS_Views::install();
 	}
+	// Create Entitlements table
+	if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','install')) {
+		DS_Entitlements::install();
+	}
+	// Create Snapshots table
+	if (class_exists('DS_Snapshots') && method_exists('DS_Snapshots','install')) {
+		DS_Snapshots::install();
+	}
 });
 
 add_action('plugins_loaded', function () {
@@ -68,6 +78,8 @@ add_action('plugins_loaded', function () {
 	DS_AI_Product_SEO::init();
 	DS_Ads::init();
 	DS_Views::init();
+	DS_Entitlements::init();
+	DS_Snapshots::init();
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }
@@ -75,6 +87,14 @@ add_action('plugins_loaded', function () {
 	// Ensure Views table exists on updates
 	if (class_exists('DS_Views') && method_exists('DS_Views','table') && method_exists('DS_Views','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Views::table())) { DS_Views::install(); }
+	}
+	// Ensure Entitlements table exists on updates
+	if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','table') && method_exists('DS_Entitlements','install')) {
+		if (!DS_Helpers::db_table_exists(DS_Entitlements::table())) { DS_Entitlements::install(); }
+	}
+	// Ensure Snapshots table exists on updates
+	if (class_exists('DS_Snapshots') && method_exists('DS_Snapshots','table') && method_exists('DS_Snapshots','install')) {
+		if (!DS_Helpers::db_table_exists(DS_Snapshots::table())) { DS_Snapshots::install(); }
 	}
 
 });

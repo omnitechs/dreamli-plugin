@@ -41,8 +41,25 @@ final class DS_Views {
         global $post; if (!$post || $post->post_type !== 'product') return;
 
         $product_id = (int)$post->ID;
+        $s = DS_Settings::get();
         $vendor_id = (int)$post->post_author;
+        if (!empty($s['entitlement_controls_payouts_ads'])) {
+            if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','current_holder')) {
+                $holder = (int) DS_Entitlements::current_holder($product_id);
+                if ($holder > 0) { $vendor_id = $holder; }
+            }
+        }
         if ($product_id <= 0 || $vendor_id <= 0) return;
+
+        // Consent gate: only track if user accepted analytics via cm_choice_v1 cookie (Elementor banner)
+        $consented = false;
+        if (isset($_COOKIE['cm_choice_v1'])) {
+            $val = sanitize_text_field((string)$_COOKIE['cm_choice_v1']);
+            if ($val === 'accept_analytics') { $consented = true; }
+        }
+        // Allow theme/CMP plugins to override via filter
+        $consented = (bool) apply_filters('ds_can_track_views', $consented, $product_id);
+        if (!$consented) return;
 
         $viewer_key = self::viewer_key();
         if ($viewer_key === '') return;
@@ -83,6 +100,14 @@ final class DS_Views {
         $rate = (float)($s['view_payout_rate_eur'] ?? 0);
         $enable = !empty($s['enable_view_payouts']);
         if (!$enable || $rate <= 0) return;
+        // Optional: pause payouts while entitlement is pending
+        if (!empty($s['entitlement_controls_payouts_ads']) && !empty($s['pause_payouts_while_pending'])) {
+            if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','is_pending_for_prev_month')) {
+                if (DS_Entitlements::is_pending_for_prev_month($product_id, $vendor_id)) {
+                    return; // still record the view but do not pay while pending
+                }
+            }
+        }
         if ($ua_is_bot && empty($s['view_pay_for_bots'])) return;
         // Exclusions
         if (!empty($s['view_excluded_vendors']) && in_array($vendor_id, (array)$s['view_excluded_vendors'], true)) return;

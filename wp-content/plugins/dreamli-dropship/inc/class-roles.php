@@ -31,6 +31,20 @@ final class DS_Roles {
                 'edit_posts' => true, 'publish_posts' => true, 'delete_posts' => true, 'edit_published_posts' => true,
             ]);
         }
+        if (!get_role('ds_vendor_admin')) {
+            add_role('ds_vendor_admin', 'Vendor Admin', [
+                // Base
+                'read' => true, 'upload_files' => true,
+                // Product capabilities (own + others)
+                'edit_products' => true, 'publish_products' => true, 'edit_published_products' => true,
+                'delete_products' => true, 'delete_published_products' => true, 'read_product' => true,
+                'assign_product_terms' => true,
+                'edit_others_products' => true,
+                // Post capabilities (blog) incl. others
+                'edit_posts' => true, 'publish_posts' => true, 'delete_posts' => true, 'edit_published_posts' => true,
+                'edit_others_posts' => true,
+            ]);
+        }
     }
 
     static function limit_own_lists($q) {

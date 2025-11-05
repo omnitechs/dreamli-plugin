@@ -25,9 +25,23 @@ final class DS_Settings {
         ];
 
         return [
+            // --- Claim & Re-claim Fees (dynamic)
+            'claim_fee_enable' => 1,
+            'entitlement_dynamic_fee_enable' => 1,
+            'claim_fee_period' => 'rolling_30d', // rolling_30d | month_to_date | previous_month
+            'claim_fee_price_basis' => 'current', // current | regular | sale
+            'claim_fee_denominator_scope' => 'published', // published | published_private | all
+            'claim_fee_min_pct' => 0.0,
+            'claim_fee_max_pct' => 100.0,
+            'claim_fee_min_eur' => 0.00,
+            'claim_fee_cache_minutes' => 60,
+            'claim_fee_statuses' => ['processing','completed'],
             // --- Moderation
             'posts_pending'    => 1,
             'products_pending' => 1,
+
+                        // --- Vendor Admin reviewer reward
+                        'vendor_admin_publish_reward_eur' => 0.50, 
 
             // --- Ads (CPC)
             'ads_cpc_home'     => 0.10,
@@ -48,6 +62,27 @@ final class DS_Settings {
 
             // --- Wallet
             'withdraw_min' => 1.00,
+
+                        // --- Entitlements (monthly ownership protection)
+                        'entitlements_enable' => 1,
+                        'entitlement_fee_eur' => 2.00,
+                        'entitlement_confirm_days' => 7,
+                        'pool_user_id' => 0,
+
+                                    // --- Entitlement routing and protections
+                                    'entitlement_controls_payouts_ads' => 1,
+                                    'pause_payouts_while_pending' => 0,
+                                    'ads_autopause_on_entitlement_loss' => 1,
+
+                                    // --- Product completeness protections (vendor)
+                                    'protect_status_demotion' => 1,
+                                    'require_featured_image' => 1,
+                                    'require_product_category' => 1,
+                                    'min_title_len' => 6,
+                                    'min_content_len' => 120,
+
+                                    // --- Snapshots
+                                    'snapshot_retention_days' => 90, 
 
             // --- View Payouts and Caps
             'enable_view_payouts' => 0,

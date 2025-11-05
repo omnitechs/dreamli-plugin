@@ -19,6 +19,12 @@ final class DS_Helpers {
         return (bool) array_intersect((array)$u->roles, ['ds_vendor_curated','ds_vendor_open']);
     }
 
+    static function is_vendor_admin($user_id = 0) : bool {
+        $u = $user_id ? get_userdata($user_id) : wp_get_current_user();
+        if (!$u) return false;
+        return in_array('ds_vendor_admin', (array)$u->roles, true);
+    }
+
     static function db_table_exists($table_name) : bool {
         global $wpdb;
         $like = $wpdb->esc_like($table_name);

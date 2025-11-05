@@ -4,6 +4,20 @@ if (!defined('ABSPATH')) exit;
 final class DS_Ads {
     const TABLE = 'ds_ad_campaigns';
 
+    // Pause helpers for entitlement changes
+    public static function pause_campaigns_for_product_user(int $product_id, int $user_id) {
+        global $wpdb; $table = self::table();
+        $wpdb->update($table, [ 'status'=>'paused', 'updated_at'=>DS_Helpers::now() ], [ 'product_id'=>$product_id, 'user_id'=>$user_id, 'status'=>'active' ], [ '%s','%s' ], [ '%d','%d','%s' ]);
+    }
+    public static function pause_campaigns_for_product_except(int $product_id, int $exclude_user_id = 0) {
+        global $wpdb; $table = self::table();
+        if ($exclude_user_id > 0) {
+            $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='paused', updated_at=%s WHERE product_id=%d AND user_id<>%d AND status='active'", DS_Helpers::now(), $product_id, $exclude_user_id));
+        } else {
+            $wpdb->update($table, [ 'status'=>'paused', 'updated_at'=>DS_Helpers::now() ], [ 'product_id'=>$product_id, 'status'=>'active' ], [ '%s','%s' ], [ '%d','%s' ]);
+        }
+    }
+
     // --- Per-visitor daily cap helpers ---
     private static function today_str() : string {
         return date('Ymd', current_time('timestamp'));

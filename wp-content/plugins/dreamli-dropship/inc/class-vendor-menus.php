@@ -6,19 +6,127 @@ final class DS_Vendor_Menus {
         add_action('admin_menu', [__CLASS__, 'menus']);
     }
 
+    // --- New: Entitlements and Pool pages ---
+    static function entitlements_page() {
+        if (!is_user_logged_in()) wp_die('No access.');
+        if (!(DS_Helpers::is_vendor() || DS_Helpers::is_vendor_admin())) wp_die('No access.');
+        $uid = get_current_user_id();
+        $ents = class_exists('DS_Entitlements') ? DS_Entitlements::user_entitlements_for_prev_month($uid) : [];
+        $status_msg = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
+        echo '<div class="wrap"><h1>Monthly Entitlements</h1>';
+        if ($status_msg) {
+            $map = [
+                'paid'=>'Payment confirmed and recorded.',
+                'insufficient'=>'Insufficient wallet balance. Please add funds.',
+                'waived'=>'No payment required for this item.',
+                'not_pending'=>'This item is not pending.',
+            ];
+            $text = isset($map[$status_msg]) ? $map[$status_msg] : $status_msg;
+            echo '<div class="notice notice-info"><p>'.esc_html($text).'</p></div>';
+        }
+        echo '<p>At the beginning of each month we evaluate last month\'s performance. If a product\'s views are below the site mean, a small fee is due to keep the entitlement for that product. Otherwise it is waived. You have a limited time to confirm payment; otherwise we\'ll attempt to auto-charge, and failing that, the product may move to the public pool.</p>';
+        if (empty($ents)) { echo '<p>No entitlements for the previous month.</p></div>'; return; }
+        $wallet_balance = DS_Wallet::balance($uid);
+        echo '<p><b>Your wallet balance:</b> €'.number_format($wallet_balance,2).'</p>';
+        echo '<table class="widefat striped"><thead><tr><th>Product</th><th>Month</th><th>Views</th><th>Mean</th><th>Status</th><th>Amount</th><th>Confirm by</th><th>Action</th></tr></thead><tbody>';
+        foreach ($ents as $r) {
+            $pid = (int)$r->product_id; $title = get_the_title($pid) ?: ('#'.$pid);
+            $due = (float)$r->amount_due; $confirm = $r->confirm_due_at ? esc_html($r->confirm_due_at) : '-';
+            echo '<tr>';
+            echo '<td>'.esc_html($title).'</td>';
+            echo '<td>'.esc_html($r->month).'</td>';
+            echo '<td>'.intval($r->views).'</td>';
+            echo '<td>'.number_format((float)$r->mean_views,2).'</td>';
+            echo '<td>'.esc_html($r->status).'</td>';
+            echo '<td>€'.number_format($due,2).'</td>';
+            echo '<td>'.$confirm.'</td>';
+            echo '<td>';
+            if ($r->status === 'pending' && $due > 0) {
+                $nonce = wp_create_nonce('ds_entitlement_confirm_'.(int)$r->id);
+                echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline;">';
+                echo '<input type="hidden" name="action" value="ds_entitlement_confirm">';
+                echo '<input type="hidden" name="ent_id" value="'.(int)$r->id.'">';
+                echo '<input type="hidden" name="_wpnonce" value="'.$nonce.'">';
+                echo '<input type="hidden" name="_wp_http_referer" value="'.esc_attr(add_query_arg(['page'=>'ds-entitlements'], admin_url('admin.php'))).'">';
+                $disabled = ($wallet_balance < $due) ? ' disabled' : '';
+                echo '<button class="button button-primary"'.$disabled.'>Confirm and Pay</button>';
+                if ($disabled) echo ' <span style="color:#a00;">Insufficient balance</span>';
+                echo '</form>';
+            } else {
+                echo '-';
+            }
+            echo '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+        echo '</div>';
+    }
+
+    static function pool_page() {
+        if (!is_user_logged_in()) wp_die('No access.');
+        if (!(DS_Helpers::is_vendor() || DS_Helpers::is_vendor_admin())) wp_die('No access.');
+        $prods = class_exists('DS_Entitlements') ? DS_Entitlements::pool_products(100) : [];
+        $claim_msg = isset($_GET['claim']) ? sanitize_text_field($_GET['claim']) : '';
+        $wallet_balance = DS_Wallet::balance(get_current_user_id());
+        echo '<div class="wrap"><h1>Product Pool</h1>';
+        if ($claim_msg) {
+            $map = [ 'ok'=>'Product claimed successfully.', 'not_in_pool'=>'This product is not in pool anymore.', 'insufficient'=>'Insufficient balance to claim this product.' ];
+            $text = isset($map[$claim_msg]) ? $map[$claim_msg] : $claim_msg;
+            echo '<div class="notice notice-info"><p>'.esc_html($text).'</p></div>';
+        }
+        echo '<p>Products in the pool can be claimed by any vendor. Claiming may require a fee based on recent average sales per product. Your wallet balance: <b>€'.number_format($wallet_balance,2).'</b>.</p>';
+        if (empty($prods)) { echo '<p>No products in pool.</p></div>'; return; }
+        echo '<table class="widefat striped"><thead><tr><th>Product</th><th>Prev Owner</th><th>Since</th><th>Claim Fee</th><th>Action</th></tr></thead><tbody>';
+        foreach ($prods as $pid) {
+            $title = get_the_title((int)$pid) ?: ('#'.(int)$pid);
+            $prev = (int) get_post_meta($pid, '_ds_pool_prev_owner', true);
+            $since = (string) get_post_meta($pid, '_ds_pool_since', true);
+            $prev_name = $prev ? ( ($u=get_userdata($prev)) ? $u->display_name : ('#'.$prev) ) : '-';
+            $nonce = wp_create_nonce('ds_pool_claim_'.(int)$pid);
+            $url = wp_nonce_url(add_query_arg(['action'=>'ds_pool_claim','product_id'=>(int)$pid], admin_url('admin-post.php')), 'ds_pool_claim_'.(int)$pid);
+            echo '<tr>';
+            echo '<td>'.esc_html($title).'</td>';
+            echo '<td>'.esc_html($prev_name).'</td>';
+            echo '<td>'.esc_html($since ?: '-').'</td>';
+            $fee_txt = '—'; $can = true;
+            $s_now = DS_Settings::get();
+            if (!empty($s_now['claim_fee_enable']) && class_exists('DS_Entitlements') && method_exists('DS_Entitlements','claim_fee_breakdown')) {
+                $bd = DS_Entitlements::claim_fee_breakdown((int)$pid);
+                $fee = isset($bd['amount']) ? (float)$bd['amount'] : 0.0;
+                $pct = isset($bd['percent']) ? (float)$bd['percent'] : 0.0;
+                $fee_txt = '€'.number_format($fee,2).' ('.number_format($pct,2).'%)';
+                if ($fee > 0 && $wallet_balance < $fee) { $can = false; }
+            }
+            echo '<td>'.esc_html($fee_txt).'</td>';
+            echo '<td>';
+            if ($can) {
+                echo '<a class="button button-primary" href="'.esc_url($url).'" onclick="return confirm(\'Claim this product?\');">Claim</a>';
+            } else {
+                $wallet_url = admin_url('admin.php?page=ds-my-wallet');
+                echo '<button class="button" disabled>Claim</button> <span style="color:#a00;">Insufficient balance</span> <a href="'.esc_url($wallet_url).'" class="button-link">Top up</a>';
+            }
+            echo '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+        echo '</div>';
+    }
+
     static function menus() {
-        if (!DS_Helpers::is_vendor()) return;
+        if (!(DS_Helpers::is_vendor() || DS_Helpers::is_vendor_admin())) return;
 
         add_menu_page('Dashboard', 'Dashboard', 'read', 'ds-vendor-dashboard', [__CLASS__, 'dashboard_page'], 'dashicons-dashboard', 3);
         add_menu_page('کیف پول من', 'کیف پول من', 'read', 'ds-my-wallet', [__CLASS__, 'wallet_page'], 'dashicons-money', 4);
         add_menu_page('فروش‌های من', 'فروش‌های من', 'edit_products', 'ds-my-sales', [__CLASS__, 'sales_page'], 'dashicons-cart', 5);
         add_menu_page('پروموت محصولات', 'پروموت محصولات', 'edit_products', 'ds-promoted', [__CLASS__, 'ads_page'], 'dashicons-megaphone', 6);
         add_menu_page('Leaderboard', 'Leaderboard', 'read', 'ds-leaderboard', [__CLASS__, 'leaderboard_page'], 'dashicons-chart-bar', 7);
+        add_menu_page('Entitlements', 'Entitlements', 'read', 'ds-entitlements', [__CLASS__, 'entitlements_page'], 'dashicons-shield', 8);
+        add_menu_page('Product Pool', 'Product Pool', 'read', 'ds-pool', [__CLASS__, 'pool_page'], 'dashicons-groups', 9);
     }
 
     static function ads_page() {
         if (!is_user_logged_in()) wp_die('No access.');
-        if (!current_user_can('edit_products') || current_user_can('edit_others_products')) wp_die('دسترسی ندارید.');
+        if (!current_user_can('edit_products') || (current_user_can('edit_others_products') && !DS_Helpers::is_vendor_admin())) wp_die('دسترسی ندارید.');
 
         $uid = get_current_user_id();
         $user_pids = DS_Orders::user_product_ids($uid);
@@ -32,6 +140,10 @@ final class DS_Vendor_Menus {
             'order' => 'ASC',
             'no_found_rows' => true,
         ]);
+        // Filter to those the user is currently entitled to (holder)
+        if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','current_holder')) {
+            $own_products = array_values(array_filter($own_products, function($pid) use ($uid){ return (int)DS_Entitlements::current_holder((int)$pid) === (int)$uid; }));
+        }
 
         echo '<div class="wrap"><h1>پروموت محصولات (CPC)</h1>';
 
@@ -44,10 +156,18 @@ final class DS_Vendor_Menus {
             $status = 'active';
 
             $errors = [];
-            if ($product_id <= 0 || !in_array($product_id, $user_pids, true)) $errors[] = 'محصول نامعتبر است.';
+            if ($product_id <= 0) $errors[] = 'محصول نامعتبر است.';
             if (!in_array($placement, ['home','category'], true)) $placement = 'home';
             if ($placement === 'category' && $cat_id <= 0) $errors[] = 'دسته‌بندی لازم است.';
             if ($daily_budget <= 0) $errors[] = 'بودجه روزانه باید بیشتر از صفر باشد.';
+            // Entitlement-based validation
+            $s_now = DS_Settings::get();
+            if (!empty($s_now['entitlement_controls_payouts_ads'])) {
+                if (class_exists('DS_Entitlements') && method_exists('DS_Entitlements','current_holder')) {
+                    $holder = (int)DS_Entitlements::current_holder($product_id);
+                    if ($holder !== $uid) { $errors[] = 'شما در حال حاضر ذی‌نفع این محصول نیستید.'; }
+                }
+            }
 
             if (empty($errors)) {
                 global $wpdb; $table = DS_Ads::table();
@@ -76,16 +196,36 @@ final class DS_Vendor_Menus {
             global $wpdb; $id = (int)$_GET['toggle']; if ($id>0) {
                 $row = $wpdb->get_row($wpdb->prepare('SELECT * FROM '.DS_Ads::table().' WHERE id=%d AND user_id=%d', $id, $uid));
                 if ($row) {
-                    $new = $row->status==='active' ? 'paused' : 'active';
-                    $wpdb->update(DS_Ads::table(), [ 'status'=>$new, 'updated_at'=>DS_Helpers::now() ], [ 'id'=>$id ], [ '%s','%s' ], [ '%d' ]);
-                    echo '<div class="notice notice-success"><p>وضعیت کمپین تغییر کرد.</p></div>';
+                    // Enforce entitlement holder for this product
+                    $ok = true;
+                    $s_now = DS_Settings::get();
+                    if (!empty($s_now['entitlement_controls_payouts_ads']) && class_exists('DS_Entitlements') && method_exists('DS_Entitlements','current_holder')) {
+                        $holder = (int)DS_Entitlements::current_holder((int)$row->product_id);
+                        if ($holder !== $uid) { $ok=false; echo '<div class="notice notice-error"><p>شما در حال حاضر ذی‌نفع این محصول نیستید.</p></div>'; }
+                    }
+                    if ($ok) {
+                        $new = $row->status==='active' ? 'paused' : 'active';
+                        $wpdb->update(DS_Ads::table(), [ 'status'=>$new, 'updated_at'=>DS_Helpers::now() ], [ 'id'=>$id ], [ '%s','%s' ], [ '%d' ]);
+                        echo '<div class="notice notice-success"><p>وضعیت کمپین تغییر کرد.</p></div>';
+                    }
                 }
             }
         }
         if (isset($_GET['delete']) && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'ds_ads_delete_'.$uid)) {
             global $wpdb; $id = (int)$_GET['delete']; if ($id>0) {
-                $wpdb->delete(DS_Ads::table(), [ 'id'=>$id, 'user_id'=>$uid ], [ '%d','%d' ]);
-                echo '<div class="notice notice-success"><p>کمپین حذف شد.</p></div>';
+                $row = $wpdb->get_row($wpdb->prepare('SELECT * FROM '.DS_Ads::table().' WHERE id=%d AND user_id=%d', $id, $uid));
+                if ($row) {
+                    $ok = true;
+                    $s_now = DS_Settings::get();
+                    if (!empty($s_now['entitlement_controls_payouts_ads']) && class_exists('DS_Entitlements') && method_exists('DS_Entitlements','current_holder')) {
+                        $holder = (int)DS_Entitlements::current_holder((int)$row->product_id);
+                        if ($holder !== $uid) { $ok=false; echo '<div class="notice notice-error"><p>شما در حال حاضر ذی‌نفع این محصول نیستید.</p></div>'; }
+                    }
+                    if ($ok) {
+                        $wpdb->delete(DS_Ads::table(), [ 'id'=>$id, 'user_id'=>$uid ], [ '%d','%d' ]);
+                        echo '<div class="notice notice-success"><p>کمپین حذف شد.</p></div>';
+                    }
+                }
             }
         }
 
@@ -216,7 +356,7 @@ final class DS_Vendor_Menus {
 
     static function sales_page() {
         if (!is_user_logged_in()) wp_die('No access.');
-        if (!current_user_can('edit_products') || current_user_can('edit_others_products')) wp_die('دسترسی ندارید.');
+        if (!current_user_can('edit_products') || (current_user_can('edit_others_products') && !DS_Helpers::is_vendor_admin())) wp_die('دسترسی ندارید.');
 
         $user_pids = DS_Orders::user_product_ids(get_current_user_id());
         $status = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
