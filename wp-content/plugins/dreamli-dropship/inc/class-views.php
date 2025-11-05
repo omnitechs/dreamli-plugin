@@ -51,11 +51,16 @@ final class DS_Views {
         }
         if ($product_id <= 0 || $vendor_id <= 0) return;
 
-        // Consent gate: only track if user accepted analytics via cm_choice_v1 cookie (Elementor banner)
+        // Consent gate: Complianz 'statistics' consent if available; else fallback to Elementor cookie cm_choice_v1=accept_analytics
         $consented = false;
-        if (isset($_COOKIE['cm_choice_v1'])) {
-            $val = sanitize_text_field((string)$_COOKIE['cm_choice_v1']);
-            if ($val === 'accept_analytics') { $consented = true; }
+        if (function_exists('cmplz_has_consent')) {
+            // Complianz categories: use 'statistics' for analytics-like tracking
+            $consented = (bool) cmplz_has_consent('statistics');
+        } else {
+            if (isset($_COOKIE['cm_choice_v1'])) {
+                $val = sanitize_text_field((string)$_COOKIE['cm_choice_v1']);
+                if ($val === 'accept_analytics') { $consented = true; }
+            }
         }
         // Allow theme/CMP plugins to override via filter
         $consented = (bool) apply_filters('ds_can_track_views', $consented, $product_id);
