@@ -46,6 +46,9 @@ final class DS_AI_Product_SEO {
     const AJAX_ACTION  = 'ds_ai_product_ai';
     const AJAX_LOGS    = 'ds_ai_get_logs';
     const QUEUE_HOOK   = 'ds_ai_worker';
+    // New async enqueue & poll hooks (Action Scheduler)
+    const ENQUEUE_HOOK = 'ds_ai_enqueue_async';
+    const POLL_HOOK    = 'ds_ai_poll';
 
     // Direct async (no WP-Cron)
     const AJAX_DIRECT  = 'ds_ai_direct_worker';
@@ -75,8 +78,13 @@ final class DS_AI_Product_SEO {
         add_action('wp_ajax_' . self::AJAX_DIRECT, [__CLASS__, 'direct_worker']);
         add_action('wp_ajax_nopriv_' . self::AJAX_DIRECT, [__CLASS__, 'direct_worker']); // در صورت نیاز تست از فرانت
 
-        // Optional: background hook (اگر بعداً خواستی AS استفاده کنی)
+        // Optional: background hook (legacy worker)
         add_action(self::QUEUE_HOOK, [__CLASS__, 'worker'], 10, 1);
+        // New async enqueue & poll handlers (Action Scheduler)
+        if (function_exists('add_action')) {
+            add_action(self::ENQUEUE_HOOK, [__CLASS__, 'enqueue_async'], 10, 1);
+            add_action(self::POLL_HOOK,    [__CLASS__, 'poll_job'],      10, 1);
+        }
 
         // Safer HTTP
         add_action('init', [__CLASS__, 'add_http_hardening']);
@@ -407,8 +415,8 @@ final class DS_AI_Product_SEO {
             // Enqueue via Action Scheduler
             $args['source'] = 'action-scheduler';
             try {
-                $job_id = as_enqueue_async_action(self::QUEUE_HOOK, [$args], 'ds-ai');
-                self::log($run_id, 'Enqueued Action Scheduler job #' . $job_id . ' (source=action-scheduler).');
+                $job_id = as_enqueue_async_action(self::ENQUEUE_HOOK, [$args], 'ds-ai');
+                self::log($run_id, 'Enqueued Action Scheduler enqueue job #' . $job_id . ' (source=action-scheduler).');
                 self::json_success(['msg'=>'Queued. Action Scheduler will process this job shortly…']);
             } catch (Exception $e) {
                 self::log($run_id, 'Action Scheduler enqueue failed: ' . $e->getMessage() . ' — falling back to Direct + WP‑Cron.');
@@ -1166,6 +1174,395 @@ final class DS_AI_Product_SEO {
     }
     private static function json_success($data=[]){ header('Content-Type: application/json; charset=utf-8'); echo wp_json_encode(['success'=>true,'data'=>$data]); wp_die(); }
     private static function json_error($message,$code=400){ status_header((int)$code); header('Content-Type: application/json; charset=utf-8'); echo wp_json_encode(['success'=>false,'message'=>$message,'code'=>(int)$code]); wp_die(); }
+
+    /* ===================== Async DB + Scheduler (new) ===================== */
+    public static function install(){
+        global $wpdb;
+        $table = $wpdb->prefix . 'ds_ai_jobs';
+        $charset = $wpdb->get_charset_collate();
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        $sql = "CREATE TABLE {$table} (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            run_id VARCHAR(64) NOT NULL,
+            post_id BIGINT(20) UNSIGNED NOT NULL,
+            response_id VARCHAR(64) NOT NULL,
+            status VARCHAR(24) NOT NULL DEFAULT 'queued',
+            attempts INT UNSIGNED NOT NULL DEFAULT 0,
+            next_poll_at DATETIME NULL,
+            last_polled_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            lease_owner VARCHAR(96) NULL,
+            lease_expires DATETIME NULL,
+            error_code VARCHAR(64) NULL,
+            error_message TEXT NULL,
+            payload_json LONGTEXT NULL,
+            last_response_json LONGTEXT NULL,
+            prompt_id VARCHAR(64) NULL,
+            prompt_version VARCHAR(16) NULL,
+            model VARCHAR(32) NULL,
+            charged TINYINT(1) NOT NULL DEFAULT 0,
+            PRIMARY KEY  (id),
+            UNIQUE KEY run_id (run_id),
+            KEY response_id (response_id),
+            KEY status_next (status, next_poll_at),
+            KEY lease_exp (lease_expires),
+            KEY post_id (post_id)
+        ) {$charset};";
+        dbDelta($sql);
+        update_option('ds_ai_db_version', '1');
+    }
+
+    private static function job_table(){
+        global $wpdb; return $wpdb->prefix . 'ds_ai_jobs';
+    }
+    private static function job_get($run_id){
+        global $wpdb; if(!$run_id) return null; $t=self::job_table();
+        return $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE run_id=%s", $run_id), ARRAY_A);
+    }
+    private static function job_insert($row){
+        global $wpdb; $t=self::job_table(); $wpdb->insert($t, $row); return (int)$wpdb->insert_id;
+    }
+    private static function job_update($run_id, $data){
+        global $wpdb; $t=self::job_table(); return $wpdb->update($t, $data, ['run_id'=>$run_id]);
+    }
+    private static function claim_lease($run_id, $owner, $ttl_sec = 25){
+        global $wpdb; $t=self::job_table();
+        $sql = "UPDATE {$t} SET lease_owner=%s, lease_expires=DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d SECOND) WHERE run_id=%s AND (lease_expires IS NULL OR lease_expires < UTC_TIMESTAMP())";
+        $wpdb->query($wpdb->prepare($sql, $owner, (int)$ttl_sec, $run_id));
+        return $wpdb->rows_affected > 0;
+    }
+    private static function release_lease($run_id, $owner){
+        global $wpdb; $t=self::job_table();
+        $wpdb->update($t, ['lease_owner'=>null,'lease_expires'=>null], ['run_id'=>$run_id,'lease_owner'=>$owner]);
+    }
+    private static function schedule_poll($run_id, $delay_sec = 10){
+        if (!function_exists('as_schedule_single_action')) return false;
+        $delay = max(1, (int)$delay_sec);
+        try {
+            as_schedule_single_action(time()+$delay, self::POLL_HOOK, [['run_id'=>$run_id]], 'ds-ai');
+            return true;
+        } catch (Exception $e) { return false; }
+    }
+
+    public static function enqueue_async($args){
+        $run_id = sanitize_text_field($args['run_id'] ?? '');
+        self::trap_start($run_id);
+        $src = isset($args['source']) ? (string)$args['source'] : 'action-scheduler';
+        $post_id = (int)($args['post_id'] ?? 0);
+        $model   = 'gpt-5';
+        $op      = sanitize_text_field($args['op'] ?? 'generate');
+        self::log($run_id, "Enqueue async start op={$op} model={$model} post_id={$post_id} source={$src}");
+
+        if ($op !== 'generate' || !$post_id){ self::log($run_id,'ERROR: bad args for enqueue'); return; }
+
+        $api_key = self::get_api_key();
+        if (!$api_key){ self::log($run_id,'ERROR: API key missing'); return; }
+
+        // Build context & payload (reuse worker logic)
+        $post = get_post($post_id);
+        if (!$post || $post->post_type!=='product'){ self::log($run_id,'ERROR: Invalid product'); return; }
+
+        self::log($run_id,'Building context...');
+        $ctx = self::build_context($post_id);
+        if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); return; }
+        if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   return; }
+        self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws=' . (!empty($ctx['keywords']) ? 1 : 0));
+        self::log($run_id,'Category URL: ' . (!empty($ctx['category_url']) ? $ctx['category_url'] : '[none]'));
+
+        $system = (string) get_option(self::OPT_SYSTEM_PROMPT, "You are an SEO copywriter...");
+        $gen    = (string) get_option(self::OPT_PROMPT_GENERATE, self::default_generate_instructions());
+
+        $user_inputs = [
+            "PRODUCT INFORMATION" => [
+                "product_name"     => $post->post_title,
+                "product_category" => $ctx['primary_cat_name'],
+                "keywords"         => $ctx['keywords'],
+                "note"             => "Images attached below. Analysis allowed."
+            ],
+            "INTERNAL LINKS (Optional)" => [
+                "category_url" => $ctx['category_url'] ?? ''
+            ],
+            "EXTERNAL LINK (Optional)" => $ctx['external_link'],
+            "USER EXPERIENCE INPUT (Optional)" => $ctx['story'] ?: ''
+        ];
+        $lines = [];
+        $lines[] = "Follow the instructions strictly below.";
+        $lines[] = "=== REQUIRED USER INPUTS (provided by system) ===";
+        $lines[] = wp_json_encode($user_inputs, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $lines[] = "=== INSTRUCTIONS ===";
+        $lines[] = trim($gen);
+
+        // Dev image substitution (reuse logic from worker)
+        $test_img = 'https://shop.dreamli.nl/wp-content/uploads/2025/10/1642280007130.jpg';
+        $img_urls_for_payload = [];
+        foreach ($ctx['img_urls'] as $u) {
+            $is_local = false;
+            if (is_string($u)) {
+                $host = parse_url($u, PHP_URL_HOST);
+                if ($host) {
+                    $host_l = strtolower($host);
+                    if ($host_l === 'localhost' || $host_l === '127.0.0.1' || substr($host_l, -6) === '.local') { $is_local = true; }
+                } elseif (stripos($u, 'localhost') !== false) { $is_local = true; }
+            }
+            if ($is_local) { self::log($run_id, 'Dev mode image replacement: '.$u.' -> '.$test_img); $img_urls_for_payload[] = $test_img; }
+            else { $img_urls_for_payload[] = $u; }
+        }
+
+        $inst = 'TOP PRIORITY: Return ONE json object only. No prose, no Markdown, no code fences. '
+               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
+               . 'Place ALL HTML only inside long_description_html. Do not output any HTML anywhere else. '
+               . 'Use internal links only if they are present in the provided context via tools (vector store or web search). Do not invent URLs. '
+               . 'If a valid category_url is provided in inputs, include up to 2 internal links using exactly that URL: one in Product Details and one in CTA, with varied anchor text. '
+               . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
+               . 'If an external link is provided, you may include it naturally up to 1–2 times. '
+               . 'Keep links HTML with <a href="...">...</a>.\n\n'
+               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"..."}\n\n'
+               . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
+
+        // Build Responses API payload (Prompt mode)
+        $prompt_id      = trim((string)get_option(self::OPT_PROMPT_ID,''));
+        $prompt_version = trim((string)get_option(self::OPT_PROMPT_VERSION,'4'));
+        $vs_csv         = (string)get_option(self::OPT_VECTOR_STORE_IDS,'');
+        $vs_ids         = array_values(array_filter(array_map('trim', explode(',', $vs_csv))));
+        $store_resp     = (string)get_option(self::OPT_STORE_RESP,'yes') === 'yes';
+        $include_csv    = (string)get_option(self::OPT_INCLUDE_FIELDS,'reasoning.encrypted_content,web_search_call.action.sources');
+        $include_fields = array_values(array_filter(array_map('trim', explode(',', $include_csv))));
+        $enable_web     = (string)get_option(self::OPT_ENABLE_WEB_SEARCH,'yes') === 'yes';
+        $search_size    = (string)get_option(self::OPT_SEARCH_CONTEXT,'medium');
+
+        $full_text = implode("\n\n", $lines) . "\n\n" . $inst;
+        $content_blocks = [ ['type'=>'input_text','text'=>$full_text] ];
+        foreach ($img_urls_for_payload as $u) { $content_blocks[] = ['type'=>'input_image','image_url'=>$u]; }
+        $img_count = count($img_urls_for_payload); $img_preview = array_slice($img_urls_for_payload,0,2);
+        self::log($run_id, 'Input images sent: '. $img_count . ( $img_count ? (' [e.g., '.implode(', ', array_map(function($s){ return (strlen($s)>120?substr($s,0,117).'...':$s); }, $img_preview)).']') : '' ) );
+        $input = [[ 'role'=>'user', 'content'=> $content_blocks ]];
+
+        $tools = [];
+        $tools[] = [ 'type'=>'file_search', 'vector_store_ids'=>$vs_ids ];
+//        if ($enable_web) {
+//            $tools[] = [
+//                'type' => 'web_search',
+//                'user_location' => [ 'type' => 'approximate' ],
+//                'search_context_size' => in_array($search_size, ['small','medium','large'], true) ? $search_size : 'medium'
+//            ];
+//        }
+
+        $payload = [
+            'prompt'    => ['id'=>$prompt_id,'version'=>$prompt_version?:'4'],
+            'input'     => $input,
+            'reasoning' => [ 'summary'=>'auto' ],
+            'tools'     => $tools,
+            'store'     => $store_resp,
+            'include'   => $include_fields,
+            'background'=> true,
+        ];
+
+        self::log($run_id,'Creating async OpenAI response (background=true)…');
+        $api_key = self::get_api_key();
+        list($created, $code, $err) = self::openai_create_async($api_key, $payload, $run_id);
+        if ($err){ self::log($run_id,'OpenAI create async ERROR: '.$err); return; }
+        $response_id = (string)($created['id'] ?? '');
+        $status = (string)($created['status'] ?? 'queued');
+        if ($response_id === '') { self::log($run_id,'ERROR: Async create returned no response_id'); return; }
+
+        // Persist job row
+        $now = current_time('mysql');
+        $row = [
+            'run_id' => $run_id,
+            'post_id'=> $post_id,
+            'response_id' => $response_id,
+            'status' => $status ?: 'queued',
+            'attempts' => 0,
+            'next_poll_at' => gmdate('Y-m-d H:i:s', time()+10),
+            'last_polled_at' => null,
+            'created_at' => $now,
+            'updated_at' => $now,
+            'lease_owner' => null,
+            'lease_expires' => null,
+            'error_code' => null,
+            'error_message' => null,
+            'payload_json' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
+            'last_response_json' => null,
+            'prompt_id' => $prompt_id,
+            'prompt_version' => $prompt_version,
+            'model' => $model,
+            'charged' => 0,
+        ];
+        self::job_insert($row);
+        self::log($run_id, 'Created async response id='.$response_id.' status='.$status.'; first poll in 10s');
+        self::schedule_poll($run_id, 10);
+    }
+
+    public static function poll_job($args){
+        $run_id = sanitize_text_field($args['run_id'] ?? '');
+        if (!$run_id) return;
+        $job = self::job_get($run_id);
+        if (!$job){ self::log($run_id,'Poll: job not found'); return; }
+        if (in_array($job['status'], ['completed','failed','cancelled','expired'], true)) { self::log($run_id,'Poll: job already terminal ('.$job['status'].')'); return; }
+
+        $owner = php_uname('n') . ':' . (function_exists('getmypid')?getmypid():0) . ':' . substr(md5(uniqid('',true)),0,8);
+        if (!self::claim_lease($run_id, $owner, 25)) { self::log($run_id,'Poll: lease held by another worker'); return; }
+
+        $api_key = self::get_api_key();
+        list($resp, $code, $err) = self::openai_get_response($api_key, $job['response_id'], $run_id);
+        $now = current_time('mysql');
+        if ($err){
+            self::log($run_id, 'Poll error: '.$err.' (http '.(int)$code.')');
+            self::job_update($run_id, [ 'attempts' => (int)$job['attempts']+1, 'last_polled_at'=>$now, 'updated_at'=>$now, 'next_poll_at'=>gmdate('Y-m-d H:i:s', time()+10) ]);
+            self::release_lease($run_id, $owner);
+            self::schedule_poll($run_id, 10);
+            return;
+        }
+        $status = (string)($resp['status'] ?? 'queued');
+        self::job_update($run_id, [ 'status'=>$status, 'last_polled_at'=>$now, 'updated_at'=>$now, 'last_response_json'=> substr(wp_json_encode($resp),0,20000) ]);
+
+        if ($status === 'completed'){
+            // Parse JSON output (reuse worker logic)
+            $parsed = $resp;
+            $candidates = [];
+            if (isset($parsed['output_text']) && is_string($parsed['output_text'])) { $candidates[] = $parsed['output_text']; }
+            if (isset($parsed['output']) && is_array($parsed['output'])) {
+                foreach ($parsed['output'] as $out) {
+                    if (isset($out['content']) && is_array($out['content'])) {
+                        foreach ($out['content'] as $c) { if (isset($c['text']) && is_string($c['text'])) { $candidates[] = $c['text']; } }
+                    }
+                }
+            }
+            if (isset($parsed['choices'][0]['message']['content'])) {
+                $tmp = $parsed['choices'][0]['message']['content'];
+                $candidates[] = is_array($tmp) ? (isset($tmp['text']) ? (string)$tmp['text'] : wp_json_encode($tmp)) : (string)$tmp;
+            }
+            $candidates = array_values(array_unique(array_map(function($s){ return is_string($s)?$s:''; }, $candidates)));
+
+            $data = null; $debug_logged = false;
+            foreach ($candidates as $idx=>$cand){
+                if (!$debug_logged) { self::log($run_id, 'Model text candidate #'.($idx+1).' snippet: '.preg_replace('/\s+/', ' ', substr($cand,0,400))); $debug_logged=true; }
+                $raw = trim($cand);
+                if (strpos($raw, '```') !== false) { $raw = preg_replace('/^```[a-zA-Z]*\s*/','',$raw); $raw = preg_replace('/\s*```$/','',$raw); $raw = trim($raw); self::log($run_id,'Stripped code fences from model output.'); }
+                $candidate_json = $raw;
+                if ($raw === '' || $raw[0] !== '{') { $p1 = strpos($raw,'{'); $p2 = strrpos($raw,'}'); if ($p1!==false && $p2!==false && $p2>$p1){ $candidate_json = substr($raw,$p1,$p2-$p1+1); self::log($run_id,'Extracted JSON object substring from surrounding text.'); } }
+                $decoded = json_decode($candidate_json, true);
+                if (is_array($decoded)) { $data = $decoded; break; }
+            }
+            if (!is_array($data)){
+                $snippet = count($candidates) ? substr($candidates[0],0,300) : '[no content]';
+                self::log($run_id,'ERROR: Invalid JSON. Snippet: '.$snippet);
+                self::job_update($run_id, ['status'=>'failed','error_code'=>'invalid_json','error_message'=>substr($snippet,0,1000),'updated_at'=>$now]);
+                self::release_lease($run_id, $owner);
+                return;
+            }
+
+            // Update product + Rank Math and charge ledger
+            $post_id = (int)$job['post_id'];
+            self::log($run_id,'Updating post fields…');
+            $post = get_post($post_id);
+            $update = [ 'ID'=>$post_id,
+                'post_title'=> sanitize_text_field($data['title'] ?? ($post?$post->post_title:'')),
+                'post_excerpt'=> wp_kses_post($data['short_description'] ?? ''),
+                'post_content'=> wp_kses_post($data['long_description_html'] ?? '')
+            ];
+            $raw_slug = isset($data['slug']) ? (string)$data['slug'] : '';
+            $norm_slug = self::normalize_slug($raw_slug !== '' ? $raw_slug : ($post?$post->post_title:''));
+            if ($raw_slug !== '') self::log($run_id, 'Slug normalized: "'.$raw_slug.'" -> "'.$norm_slug.'"');
+            if (!empty($norm_slug)) $update['post_name'] = $norm_slug;
+            wp_update_post($update);
+            update_post_meta($post_id, 'rank_math_title', sanitize_text_field($data['meta_title'] ?? ''));
+            update_post_meta($post_id, 'rank_math_description', sanitize_text_field($data['meta_description'] ?? ''));
+            if (!empty($data['focus_keywords']) && is_array($data['focus_keywords'])){
+                update_post_meta($post_id, 'rank_math_focus_keyword', implode(', ', array_map('sanitize_text_field',$data['focus_keywords'])));
+            }
+            self::log($run_id,'Post updated');
+
+            // Ledger charge (idempotent)
+            $price = (float) get_option(self::OPT_GPT5_PRICE_EUR, 0);
+            $user_id = (int) get_post_field('post_author', $post_id);
+            if ($price > 0 && $user_id > 0 && (int)$job['charged'] === 0) {
+                $meta = [ 'post_id'=>$post_id, 'run_id'=>$run_id, 'model'=>'gpt-5', 'prompt_id'=>$job['prompt_id'], 'prompt_version'=>$job['prompt_version'], 'response_id'=>$job['response_id'] ];
+                $ref = 'ai_seo:' . $post_id . ':' . $run_id;
+                $ledger_id = DS_Wallet::add($user_id, 'ai_seo_request', 0 - $price, $ref, 'posted', $meta);
+                self::job_update($run_id, ['charged'=>1, 'updated_at'=>$now]);
+                self::log($run_id, 'Ledger charged -' . number_format($price, 2) . ' EUR (entry #' . $ledger_id . ')');
+            } else {
+                self::log($run_id, 'Ledger: no charge (price=0 or missing author or already charged).');
+            }
+
+            self::job_update($run_id, ['status'=>'completed','updated_at'=>$now]);
+            self::release_lease($run_id, $owner);
+            self::mark_done($run_id);
+            self::log($run_id,'Worker done');
+            return;
+        }
+
+        if (in_array($status, ['queued','in_progress'], true)){
+            $attempts = (int)$job['attempts'] + 1;
+            self::job_update($run_id, [ 'attempts'=>$attempts, 'next_poll_at'=>gmdate('Y-m-d H:i:s', time()+10), 'updated_at'=>$now ]);
+            self::release_lease($run_id, $owner);
+            self::log($run_id, 'Poll #'. $attempts .' status='.$status.'; next in 10s');
+            self::schedule_poll($run_id, 10);
+            return;
+        }
+
+        // Terminal failure
+        self::job_update($run_id, ['status'=>$status, 'updated_at'=>$now]);
+        self::release_lease($run_id, $owner);
+        self::log($run_id, 'Terminal status: '.$status);
+    }
+
+    private static function openai_create_async($api_key, $payload, $run_id=''){
+        // Ensure background flag
+        $payload['background'] = true;
+        $endpoint = 'https://api.openai.com/v1/responses';
+        $body_json = wp_json_encode($payload);
+        self::log($run_id, 'Async create payload bytes='.strlen($body_json));
+        $args = [
+            'headers'=>[
+                'Content-Type'=>'application/json',
+                'Authorization'=>'Bearer '.$api_key,
+                'Expect'=>''
+            ],
+            'body'=> $body_json,
+            'timeout'=>20,
+            'redirection'=>0,
+            'sslverify'=>true
+        ];
+        $res = wp_remote_post($endpoint, $args);
+        if (is_wp_error($res)) return [null, null, $res->get_error_message()];
+        $code = wp_remote_retrieve_response_code($res);
+        $body = wp_remote_retrieve_body($res);
+        if ($code>=200 && $code<300){
+            $parsed = json_decode($body, true);
+            if (json_last_error() !== JSON_ERROR_NONE) return [null, $code, 'JSON parse error: '.json_last_error_msg()];
+            return [$parsed, $code, null];
+        }
+        return [null, $code, substr($body,0,400)];
+    }
+
+    private static function openai_get_response($api_key, $response_id, $run_id=''){
+        $endpoint = 'https://api.openai.com/v1/responses/' . rawurlencode($response_id);
+        $args = [
+            'headers'=>[
+                'Authorization'=>'Bearer '.$api_key,
+                'Accept'=>'application/json',
+                'Expect'=>''
+            ],
+            'timeout'=>20,
+            'redirection'=>0,
+            'sslverify'=>true
+        ];
+        $res = wp_remote_get($endpoint, $args);
+        if (is_wp_error($res)) return [null, null, $res->get_error_message()];
+        $code = wp_remote_retrieve_response_code($res);
+        $body = wp_remote_retrieve_body($res);
+        $snippet = substr((string)$body, 0, 400);
+        self::log($run_id, "Poll GET HTTP {$code}, body snippet: ".preg_replace('/\s+/', ' ', $snippet));
+        if ($code>=200 && $code<300){
+            $parsed = json_decode($body, true);
+            if (json_last_error() !== JSON_ERROR_NONE) return [null, $code, 'JSON parse error: '.json_last_error_msg()];
+            return [$parsed, $code, null];
+        }
+        return [null, $code, substr($body,0,400)];
+    }
 
     /* ===================== Legacy compat ===================== */
     public static function create_table(){

@@ -30,12 +30,15 @@ require_once DS_PLUGIN_DIR . 'inc/class-ai-product-seo.php';
 
 
 register_activation_hook(__FILE__, function () {
-    // جدول لجر + تنظیمات پیش‌فرض
+    // Tables and default settings
     DS_Wallet::create_table();
     if (!get_option('ds_settings')) {
         update_option('ds_settings', DS_Settings::defaults());
     }
-	 
+    // Create AI jobs table (async polling)
+    if (class_exists('DS_AI_Product_SEO') && method_exists('DS_AI_Product_SEO', 'install')) {
+        DS_AI_Product_SEO::install();
+    }
 });
 
 add_action('plugins_loaded', function () {
