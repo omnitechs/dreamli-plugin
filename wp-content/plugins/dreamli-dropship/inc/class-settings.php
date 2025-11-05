@@ -6,8 +6,7 @@ final class DS_Settings {
     const OPTION_KEY = 'ds_settings';
 
     public static function init() {
-        add_action('admin_menu', [__CLASS__, 'add_menu']);
-        add_action('admin_init', [__CLASS__, 'register_settings']);
+        // Consolidated under DS_Admin_Menus; no separate DS_Settings admin pages.
     }
 
     /** ---------- Defaults (merged with your current values) ---------- */
@@ -58,6 +57,11 @@ final class DS_Settings {
 
             // --- Product Options (WAPF) meta key; empty = auto-detect
             'po_meta_key' => '',
+            // IDs for WAPF "Type" fields (optional)
+            'po_type_field_main_id' => '',
+            'po_type_field_secondary_id' => '',
+            // Choice pricing rules per material for WAPF (used by Dropship settings UI)
+            'po_choice_rules' => [],
 
             // --- Pricing Engine config
             'pe_waste_rate' => 0.08,
@@ -75,14 +79,6 @@ final class DS_Settings {
             'pe_profit_hint_full' => 16.0,
             'pe_profit_hint_market' => 12.0,
             'pe_materials' => $materials_default,
-
-            // --- NEW: APF/WAPF Choice Pricing Controller
-            // تیک فعال‌سازی: اگر روشن باشد، هنگام «اعمال»، قیمت گزینه‌های Type از روی این جدول ست می‌شود
-            'apf_choice_apply' => 0,
-            // برای هر متریال: type=fixed|percent ، اگر fixed باشد extra به دلتا اضافه می‌شود؛ اگر percent باشد همان درصد به WAPF داده می‌شود
-            'apf_choice_pricing' => [
-                // پر می‌شود در get() بر اساس pe_materials
-            ],
         ];
     }
 
@@ -92,7 +88,7 @@ final class DS_Settings {
         $opt = get_option(self::OPTION_KEY);
         if (!is_array($opt)) $opt = [];
 
-        // Merge with defaults (your previous behavior)
+        // Merge with defaults
         $opt = array_merge($def, $opt);
 
         // Ensure pe_materials is array
@@ -100,29 +96,21 @@ final class DS_Settings {
             $opt['pe_materials'] = $def['pe_materials'];
         }
 
-        // Ensure apf_choice_pricing skeleton exists for all materials
-        if (!isset($opt['apf_choice_pricing']) || !is_array($opt['apf_choice_pricing'])) {
-            $opt['apf_choice_pricing'] = [];
+        // Normalize choice pricing rules used by Dropship UI
+        if (!isset($opt['po_choice_rules']) || !is_array($opt['po_choice_rules'])) {
+            $opt['po_choice_rules'] = [];
         }
+        $norm_rules = [];
         foreach (array_keys($opt['pe_materials']) as $mat) {
-            if (!isset($opt['apf_choice_pricing'][$mat])) {
-                $opt['apf_choice_pricing'][$mat] = [
-                    'type'    => 'fixed', // fixed | percent
-                    'percent' => 0,
-                    'extra'   => 0,
-                ];
-            } else {
-                $row = $opt['apf_choice_pricing'][$mat];
-                $opt['apf_choice_pricing'][$mat] = [
-                    'type'    => in_array(($row['type'] ?? 'fixed'), ['fixed','percent'], true) ? $row['type'] : 'fixed',
-                    'percent' => floatval($row['percent'] ?? 0),
-                    'extra'   => floatval($row['extra'] ?? 0),
-                ];
-            }
+            $row = $opt['po_choice_rules'][$mat] ?? ['type'=>'inherit','value'=>0,'extra'=>0];
+            $type = in_array(($row['type'] ?? 'inherit'), ['inherit','fixed','percent','none'], true) ? $row['type'] : 'inherit';
+            $norm_rules[$mat] = [
+                'type'  => $type,
+                'value' => isset($row['value']) ? (float)$row['value'] : 0.0,
+                'extra' => isset($row['extra']) ? (float)$row['extra'] : 0.0,
+            ];
         }
-
-        // Normalize apply switch
-        $opt['apf_choice_apply'] = !empty($opt['apf_choice_apply']) ? 1 : 0;
+        $opt['po_choice_rules'] = $norm_rules;
 
         return $opt;
     }
@@ -132,78 +120,4 @@ final class DS_Settings {
         update_option(self::OPTION_KEY, array_merge($cur, $new));
     }
 
-    /** ---------- Admin UI ---------- */
-    public static function add_menu() {
-        // Root
-        add_menu_page(
-            'Dreamli',
-            'Dreamli',
-            'manage_woocommerce',
-            'ds_root',
-            function(){ echo '<div class="wrap"><h1>Dreamli</h1><p>Use submenus.</p></div>'; },
-            'dashicons-admin-generic',
-            58
-        );
-
-        // Pricing & Fields
-        add_submenu_page(
-            'ds_root',
-            'Pricing & Fields',
-            'Pricing & Fields',
-            'manage_woocommerce',
-            'ds_pricing',
-            [__CLASS__, 'render_page']
-        );
-    }
-
-    public static function register_settings() {
-        register_setting(self::OPTION_KEY, self::OPTION_KEY);
-
-        add_settings_section('ds_section_apf', 'APF/WAPF – Choice Pricing Controller', function(){
-            echo '<p>نوع و مقدار قیمت گزینه‌های <strong>Type</strong> (متریال‌ها). اگر «Apply» روشن باشد، هنگام «اعمال»، این قواعد روی گزینه‌های Type در WAPF نوشته می‌شود.</p>';
-        }, self::OPTION_KEY);
-
-        add_settings_field('apf_choice_apply', 'Apply choice pricing from settings', function(){
-            $opt = self::get();
-            printf(
-                '<label><input type="checkbox" name="%s[apf_choice_apply]" value="1" %s> فعال</label>',
-                esc_attr(self::OPTION_KEY),
-                checked(!empty($opt['apf_choice_apply']), true, false)
-            );
-        }, self::OPTION_KEY, 'ds_section_apf');
-
-        add_settings_field('apf_choice_pricing', 'Per-material rules', function(){
-            $opt = self::get();
-            $mats = array_keys($opt['pe_materials']);
-            echo '<table class="widefat striped" style="max-width:1000px"><thead><tr>';
-            echo '<th>Material</th><th>Type</th><th style="width:160px">Percent (%%)</th><th style="width:160px">Extra (fixed €)</th>';
-            echo '</tr></thead><tbody>';
-            foreach ($mats as $m) {
-                $row = $opt['apf_choice_pricing'][$m] ?? ['type'=>'fixed','percent'=>0,'extra'=>0];
-                $type = esc_attr($row['type']);
-                $percent = esc_attr($row['percent']);
-                $extra = esc_attr($row['extra']);
-                echo '<tr>';
-                echo '<td><code>'.esc_html($m).'</code></td>';
-                echo '<td><select name="'.esc_attr(self::OPTION_KEY).'[apf_choice_pricing]['.esc_attr($m).'][type]">';
-                echo '<option value="fixed" '.selected($type,'fixed',false).'>fixed</option>';
-                echo '<option value="percent" '.selected($type,'percent',false).'>percent</option>';
-                echo '</select></td>';
-                echo '<td><input type="number" step="0.01" name="'.esc_attr(self::OPTION_KEY).'[apf_choice_pricing]['.esc_attr($m).'][percent]" value="'.esc_attr($percent).'" /></td>';
-                echo '<td><input type="number" step="0.01" name="'.esc_attr(self::OPTION_KEY).'[apf_choice_pricing]['.esc_attr($m).'][extra]" value="'.esc_attr($extra).'" /></td>';
-                echo '</tr>';
-            }
-            echo '</tbody></table>';
-            echo '<p class="description">اگر <strong>fixed</strong> باشد: مبلغ گزینه = <code>دلتا + Extra</code>. اگر <strong>percent</strong> باشد: مقدار درصد به WAPF داده می‌شود تا روی قیمت اعمال شود.</p>';
-        }, self::OPTION_KEY, 'ds_section_apf');
-    }
-
-    public static function render_page() {
-        echo '<div class="wrap"><h1>Dreamli – Pricing & Fields</h1>';
-        echo '<form method="post" action="options.php">';
-        settings_fields(self::OPTION_KEY);
-        do_settings_sections(self::OPTION_KEY);
-        submit_button();
-        echo '</form></div>';
-    }
 }

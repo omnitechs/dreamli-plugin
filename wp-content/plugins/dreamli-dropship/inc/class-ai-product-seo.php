@@ -39,7 +39,7 @@ final class DS_AI_Product_SEO {
 
     public static function init(){
         // Settings
-        add_action('admin_menu', [__CLASS__, 'settings_page']);
+        add_action('admin_menu', [__CLASS__, 'settings_page'], 20);
         add_action('admin_init', [__CLASS__, 'register_settings']);
 
         // Product metabox
@@ -72,7 +72,8 @@ final class DS_AI_Product_SEO {
 
     /* ===================== Settings ===================== */
     public static function settings_page(){
-        add_options_page('AI Generator', 'AI Generator', 'manage_options', 'ds-ai-generator', [__CLASS__, 'render_settings']);
+        // Move AI settings under Dropship admin menu
+        add_submenu_page('ds-root', 'AI Generator', 'AI Generator', 'manage_options', 'ds-ai-generator', [__CLASS__, 'render_settings']);
     }
     public static function register_settings(){
         register_setting('ds_ai_generator', self::OPT_API_KEY, [
@@ -428,15 +429,15 @@ final class DS_AI_Product_SEO {
             $content[] = ['type'=>'image_url','image_url'=>['url'=>$u]];
         }
 
+        $inst = 'Return a single JSON object only (valid JSON, no markdown). Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
+               . '- Use the provided category_url exactly 3 times across the copy (1× in short_description, 2× in long_description_html). '
+               . '- Also insert 3–7 natural internal links to product pages, ONLY from the provided "RELATED PRODUCTS" list (use their url; anchor text = product title or a natural phrase). '
+               . '- Do not invent URLs. Keep links HTML with <a href="...">...</a>.';
+
         $messages = [
             ['role'=>'system','content'=>$system],
             ['role'=>'user','content'=>$content],
-            ['role'=>'system','content'=>
-                'Return a single JSON object only (valid JSON, no markdown). Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. ' .
-                '- Use the provided category_url exactly 3 times across the copy (1× in short_description, 2× in long_description_html). ' .
-                '- Also insert 3–7 natural internal links to product pages, ONLY from the provided "RELATED PRODUCTS" list (use their url; anchor text = product title or a natural phrase). ' .
-                '- Do not invent URLs. Keep links HTML with <a href=\"...\">...</a>.'
-            ]
+            ['role'=>'system','content'=>$inst]
         ];
 
         // Call OpenAI
@@ -455,13 +456,15 @@ final class DS_AI_Product_SEO {
         }
         self::log($run_id,'Returned in '.$dt.'s');
 
-        $content = $parsed['choices'][0]['message']['content'] ?? '';
+        $content = isset($parsed['choices'][0]['message']['content']) ? $parsed['choices'][0]['message']['content'] : '';
         if (is_array($content)) {
             $content = isset($content['text']) ? (string)$content['text'] : wp_json_encode($content);
         }
-        if (!is_string($content)) $content = '';
+        if (!is_string($content)) {
+            $content = '';
+        }
 
-        if (strlen($content) && $content[0] === '<'){
+        if (is_string($content) && strlen($content) > 0 && substr($content,0,1) === '<'){
             self::log($run_id,'ERROR: HTML returned instead of JSON. Snippet: '.substr($content,0,200));
             return;
         }
