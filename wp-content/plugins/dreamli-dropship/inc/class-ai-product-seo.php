@@ -585,14 +585,14 @@ final class DS_AI_Product_SEO {
         }
 
         $inst = 'TOP PRIORITY: Return ONE json object only. No prose, no Markdown, no code fences. '
-               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
+               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug, faq (array of {question, answer}). '
                . 'Place ALL HTML only inside long_description_html. Do not output any HTML anywhere else. '
                . 'Use internal links only if they are present in the provided context via tools (vector store or web search). Do not invent URLs. '
                . 'If a valid category_url is provided in inputs, include up to 2 internal links using exactly that URL: one in Product Details and one in CTA, with varied anchor text. '
                . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
                . 'If an external link is provided, you may include it naturally up to 1–2 times. '
                . 'Keep links HTML with <a href="...">...</a>.\n\n'
-               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"..."}\n\n'
+               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"...","faq":[{"question":"...","answer":"..."}]}\n\n'
                . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
         $messages = [
@@ -762,6 +762,36 @@ final class DS_AI_Product_SEO {
             update_post_meta($post_id, 'rank_math_focus_keyword', implode(', ', array_map('sanitize_text_field',$data['focus_keywords'])));
         }
 
+        // ACF FAQ repeater update (product_faq)
+        if (isset($data['faq']) && is_array($data['faq'])) {
+            $rows = [];
+            $count = 0;
+            foreach ($data['faq'] as $it) {
+                if ($count >= 12) break; // cap to 12
+                if (!is_array($it)) continue;
+                $q = isset($it['question']) ? sanitize_text_field($it['question']) : '';
+                $a = isset($it['answer']) ? sanitize_text_field($it['answer']) : '';
+                if ($q === '' || $a === '') continue;
+                $rows[] = [
+                    'field_68d2304ed7bb8' => $q, // question
+                    'field_68d23092d7bb9' => $a  // answer
+                ];
+                $count++;
+            }
+            if (function_exists('update_field')) {
+                if (!empty($rows)) {
+                    $ok = update_field('field_68d22fead7bb7', $rows, $post_id);
+                    self::log($run_id, 'ACF FAQ updated: '.count($rows).' items'.($ok?'':' (update_field returned false)'));
+                } else {
+                    self::log($run_id, 'ACF FAQ: no valid items found in model output; leaving existing values');
+                }
+            } else {
+                self::log($run_id, 'ACF not installed: cannot update product_faq');
+            }
+        } else {
+            self::log($run_id, 'No FAQ found in model JSON; skipping ACF update');
+        }
+        
         self::log($run_id,'Post updated');
 
         // Charge user ledger for this successful OpenAI generation
@@ -1310,14 +1340,14 @@ final class DS_AI_Product_SEO {
         }
 
         $inst = 'TOP PRIORITY: Return ONE json object only. No prose, no Markdown, no code fences. '
-               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug. '
+               . 'Keys: title, short_description, long_description_html, meta_title, meta_description, focus_keywords (array of strings), slug, faq (array of {question, answer}). '
                . 'Place ALL HTML only inside long_description_html. Do not output any HTML anywhere else. '
                . 'Use internal links only if they are present in the provided context via tools (vector store or web search). Do not invent URLs. '
                . 'If a valid category_url is provided in inputs, include up to 2 internal links using exactly that URL: one in Product Details and one in CTA, with varied anchor text. '
                . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
                . 'If an external link is provided, you may include it naturally up to 1–2 times. '
                . 'Keep links HTML with <a href="...">...</a>.\n\n'
-               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"..."}\n\n'
+               . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"...","faq":[{"question":"...","answer":"..."}]}\n\n'
                . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
         // Build Responses API payload (Prompt mode)
@@ -1472,6 +1502,37 @@ final class DS_AI_Product_SEO {
             if (!empty($data['focus_keywords']) && is_array($data['focus_keywords'])){
                 update_post_meta($post_id, 'rank_math_focus_keyword', implode(', ', array_map('sanitize_text_field',$data['focus_keywords'])));
             }
+
+            // ACF FAQ repeater update (product_faq)
+            if (isset($data['faq']) && is_array($data['faq'])) {
+                $rows = [];
+                $count = 0;
+                foreach ($data['faq'] as $it) {
+                    if ($count >= 12) break; // cap to 12
+                    if (!is_array($it)) continue;
+                    $q = isset($it['question']) ? sanitize_text_field($it['question']) : '';
+                    $a = isset($it['answer']) ? sanitize_text_field($it['answer']) : '';
+                    if ($q === '' || $a === '') continue;
+                    $rows[] = [
+                        'field_68d2304ed7bb8' => $q, // question
+                        'field_68d23092d7bb9' => $a  // answer
+                    ];
+                    $count++;
+                }
+                if (function_exists('update_field')) {
+                    if (!empty($rows)) {
+                        $ok = update_field('field_68d22fead7bb7', $rows, $post_id);
+                        self::log($run_id, 'ACF FAQ updated: '.count($rows).' items'.($ok?'':' (update_field returned false)'));
+                    } else {
+                        self::log($run_id, 'ACF FAQ: no valid items found in model output; leaving existing values');
+                    }
+                } else {
+                    self::log($run_id, 'ACF not installed: cannot update product_faq');
+                }
+            } else {
+                self::log($run_id, 'No FAQ found in model JSON; skipping ACF update');
+            }
+
             self::log($run_id,'Post updated');
 
             // Ledger charge (idempotent)
