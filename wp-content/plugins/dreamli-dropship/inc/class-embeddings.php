@@ -603,21 +603,25 @@ final class DS_Embeddings {
     public static function poll_batches_as($args){
         $vs_id = isset($args['vector_store_id']) ? (string)$args['vector_store_id'] : get_option(self::OPT_VS_ID,'');
         $batch_id = isset($args['batch_id']) ? (string)$args['batch_id'] : '';
-        if (!$vs_id || !$batch_id) return;
+        if (!$vs_id || !$batch_id) { self::log('Poll skip: missing vs_id or batch_id'); return; }
         $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/file_batches/'.rawurlencode($batch_id);
         $code=null; list($resp, $err) = self::http_json('GET',$url,null,$code);
         if ($err || !$resp){
+            self::log('Poll error vs_id='.$vs_id.' batch_id='.$batch_id.' http='.(string)$code.' err='.substr((string)$err,0,160));
             self::upsert_batch_row($vs_id, $batch_id, 'error', null, $err);
             return;
         }
         $status = (string)($resp['status'] ?? '');
         $counts = $resp['counts'] ?? null;
+        self::log('Poll ok vs_id='.$vs_id.' batch_id='.$batch_id.' http='.(string)$code.' status='.( $status ?: 'unknown' ).' counts='.json_encode($counts));
         self::upsert_batch_row($vs_id, $batch_id, $status ?: 'unknown', $counts, null);
 
         if ($status === 'completed' || $status === 'failed'){
+            self::log('Poll: batch finished; reconciling files for batch_id='.$batch_id);
             // Reconcile per-file statuses by checking each row with this batch
             self::reconcile_batch($vs_id, $batch_id);
         } else {
+            self::log('Poll: batch still in progress; scheduling another poll in 120s for batch_id='.$batch_id);
             // Re-schedule poll in ~2 minutes
             if (function_exists('as_schedule_single_action')){
                 as_schedule_single_action(time()+120, 'ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id], 'ds-embeddings');
