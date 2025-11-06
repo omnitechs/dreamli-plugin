@@ -952,7 +952,7 @@ final class DS_AI_Product_SEO {
     }
 
     /* ===================== HTTP/OpenAI ===================== */
-    private static function get_api_key(){
+    public static function get_api_key(){
         if (defined('OPENAI_API_KEY') && OPENAI_API_KEY) return OPENAI_API_KEY;
         return (string) get_option(self::OPT_API_KEY, '');
     }

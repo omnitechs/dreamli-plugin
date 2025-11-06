@@ -33,6 +33,7 @@ require_once DS_PLUGIN_DIR . 'inc/class-leaderboard.php';
 require_once DS_PLUGIN_DIR . 'inc/class-entitlements.php';
 require_once DS_PLUGIN_DIR . 'inc/class-snapshots.php';
 require_once DS_PLUGIN_DIR . 'inc/class-keywords.php';
+require_once DS_PLUGIN_DIR . 'inc/class-embeddings.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -65,6 +66,10 @@ register_activation_hook(__FILE__, function () {
     if (class_exists('DS_Keywords') && method_exists('DS_Keywords','install')) {
         DS_Keywords::install();
     }
+    // Create Embeddings tables
+    if (class_exists('DS_Embeddings') && method_exists('DS_Embeddings','install')) {
+        DS_Embeddings::install();
+    }
 });
 
 add_action('plugins_loaded', function () {
@@ -86,6 +91,7 @@ add_action('plugins_loaded', function () {
 	DS_Entitlements::init();
     DS_Snapshots::init();
     DS_Keywords::init();
+    DS_Embeddings::init();
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }
@@ -105,6 +111,11 @@ add_action('plugins_loaded', function () {
     // Ensure Keywords tables exist on updates
     if (class_exists('DS_Keywords') && method_exists('DS_Keywords','table_keywords') && method_exists('DS_Keywords','install')) {
         if (!DS_Helpers::db_table_exists(DS_Keywords::table_keywords())) { DS_Keywords::install(); }
+    }
+    // Ensure Embeddings tables exist on updates
+    if (class_exists('DS_Embeddings') && method_exists('DS_Embeddings','table_items') && method_exists('DS_Embeddings','install')) {
+        global $wpdb; $t = DS_Embeddings::table_items();
+        if (!DS_Helpers::db_table_exists($t)) { DS_Embeddings::install(); }
     }
 
 });

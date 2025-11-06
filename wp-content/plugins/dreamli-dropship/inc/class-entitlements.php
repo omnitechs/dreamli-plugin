@@ -490,33 +490,29 @@ final class DS_Entitlements {
 			echo '<p style="color:#666;">Claim fee today: '.esc_html($fee_t).'</p>';
 		}
 		// Set override
-		echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'">';
-		echo '<input type="hidden" name="action" value="ds_entitlement_override_set">';
-		echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-		echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
-		echo '<p>User ID: <input type="number" name="user_id" min="1" step="1" style="width:100%" required></p>';
+		printf('<form method="post" action="%s">', esc_url(admin_url('admin-post.php?action=ds_entitlement_override_set')));
+		printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
+		echo wp_nonce_field('ds_ent_override_'.$pid, '_ds_ent_nonce', true, false);
+		echo '<p>User ID: <input type="number" name="user_id" min="1" step="1" style="width:100%"></p>';
 		echo '<p><button class="button button-primary" type="submit">Set override</button></p>';
 		echo '</form>';
 		// Clear override
-		echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:6px">';
-		echo '<input type="hidden" name="action" value="ds_entitlement_override_clear">';
-		echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-		echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
+		printf('<form method="post" action="%s" style="margin-top:6px">', esc_url(admin_url('admin-post.php?action=ds_entitlement_override_clear')));
+		printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
+		echo wp_nonce_field('ds_ent_override_'.$pid, '_ds_ent_nonce', true, false);
 		echo '<p><button class="button" type="submit">Clear override</button></p>';
 		echo '</form>';
 		// Pool controls
 		if (!$in_pool) {
-			echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:6px">';
-			echo '<input type="hidden" name="action" value="ds_pool_send">';
-			echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-			echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
+			printf('<form method="post" action="%s" style="margin-top:6px">', esc_url(admin_url('admin-post.php?action=ds_pool_send')));
+			printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
+			echo wp_nonce_field('ds_pool_'.$pid, '_ds_ent_nonce', true, false);
 			echo '<p><button class="button" type="submit">Send to Pool</button></p>';
 			echo '</form>';
 		} else {
-			echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:6px">';
-			echo '<input type="hidden" name="action" value="ds_pool_remove">';
-			echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-			echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
+			printf('<form method="post" action="%s" style="margin-top:6px">', esc_url(admin_url('admin-post.php?action=ds_pool_remove')));
+			printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
+			echo wp_nonce_field('ds_pool_'.$pid, '_ds_ent_nonce', true, false);
 			echo '<p>Restore to User ID (optional): <input type="number" name="user_id" min="1" step="1" style="width:100%"></p>';
 			echo '<p><button class="button" type="submit">Remove from Pool</button></p>';
 			echo '</form>';
@@ -559,7 +555,7 @@ final class DS_Entitlements {
 		if (!current_user_can('edit_others_products')) wp_die('No permission');
 		$pid = (int)($_POST['product_id'] ?? 0);
 		$uid = (int)($_POST['user_id'] ?? 0);
-		check_admin_referer('ds_ent_override_'.$pid);
+		check_admin_referer('ds_ent_override_'.$pid, '_ds_ent_nonce');
 		if ($pid>0 && $uid>0) {
 			update_post_meta($pid, '_ds_entitlement_override_user', $uid);
 			unset(self::$holder_cache[$pid]);
@@ -571,7 +567,7 @@ final class DS_Entitlements {
 	public static function handle_override_clear(){
 		if (!current_user_can('edit_others_products')) wp_die('No permission');
 		$pid = (int)($_POST['product_id'] ?? 0);
-		check_admin_referer('ds_ent_override_'.$pid);
+		check_admin_referer('ds_ent_override_'.$pid, '_ds_ent_nonce');
 		if ($pid>0) { delete_post_meta($pid, '_ds_entitlement_override_user'); unset(self::$holder_cache[$pid]); }
 		wp_safe_redirect(wp_get_referer() ?: admin_url('edit.php?post_type=product'));
 		exit;
@@ -579,7 +575,7 @@ final class DS_Entitlements {
 	public static function handle_pool_send(){
 		if (!current_user_can('edit_others_products')) wp_die('No permission');
 		$pid = (int)($_POST['product_id'] ?? 0);
-		check_admin_referer('ds_pool_'.$pid);
+		check_admin_referer('ds_pool_'.$pid, '_ds_ent_nonce');
 		if ($pid>0) { self::forfeit_to_pool($pid, (int)get_post_field('post_author',$pid)); unset(self::$holder_cache[$pid]); }
 		wp_safe_redirect(wp_get_referer() ?: admin_url('edit.php?post_type=product'));
 		exit;
@@ -588,7 +584,7 @@ final class DS_Entitlements {
 		if (!current_user_can('edit_others_products')) wp_die('No permission');
 		$pid = (int)($_POST['product_id'] ?? 0);
 		$uid = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
-		check_admin_referer('ds_pool_'.$pid);
+		check_admin_referer('ds_pool_'.$pid, '_ds_ent_nonce');
 		if ($pid>0) { self::remove_from_pool($pid, $uid); unset(self::$holder_cache[$pid]); }
 		wp_safe_redirect(wp_get_referer() ?: admin_url('edit.php?post_type=product'));
 		exit;
