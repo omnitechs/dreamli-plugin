@@ -32,6 +32,7 @@ require_once DS_PLUGIN_DIR . 'inc/class-views.php';
 require_once DS_PLUGIN_DIR . 'inc/class-leaderboard.php';
 require_once DS_PLUGIN_DIR . 'inc/class-entitlements.php';
 require_once DS_PLUGIN_DIR . 'inc/class-snapshots.php';
+require_once DS_PLUGIN_DIR . 'inc/class-keywords.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -60,6 +61,10 @@ register_activation_hook(__FILE__, function () {
 	if (class_exists('DS_Snapshots') && method_exists('DS_Snapshots','install')) {
 		DS_Snapshots::install();
 	}
+    // Create Keywords tables and schedules
+    if (class_exists('DS_Keywords') && method_exists('DS_Keywords','install')) {
+        DS_Keywords::install();
+    }
 });
 
 add_action('plugins_loaded', function () {
@@ -79,7 +84,8 @@ add_action('plugins_loaded', function () {
 	DS_Ads::init();
 	DS_Views::init();
 	DS_Entitlements::init();
-	DS_Snapshots::init();
+    DS_Snapshots::init();
+    DS_Keywords::init();
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }
@@ -96,5 +102,9 @@ add_action('plugins_loaded', function () {
 	if (class_exists('DS_Snapshots') && method_exists('DS_Snapshots','table') && method_exists('DS_Snapshots','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Snapshots::table())) { DS_Snapshots::install(); }
 	}
+    // Ensure Keywords tables exist on updates
+    if (class_exists('DS_Keywords') && method_exists('DS_Keywords','table_keywords') && method_exists('DS_Keywords','install')) {
+        if (!DS_Helpers::db_table_exists(DS_Keywords::table_keywords())) { DS_Keywords::install(); }
+    }
 
 });
