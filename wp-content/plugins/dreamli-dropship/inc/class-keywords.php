@@ -38,6 +38,8 @@ final class DS_Keywords {
         add_action('admin_init', [__CLASS__,'register_settings']);
         add_action('admin_init', [__CLASS__,'handle_admin_actions']);
         add_action('admin_init', [__CLASS__,'purge_logs_maybe']);
+        // Gate check single-event hook (term/lang-specific follow-ups evaluation)
+        add_action('ds_keywords_gate_check', [__CLASS__, 'gate_check_handler'], 10, 2);
 
         // Term fields: related seeds per category & per language
         add_action('product_cat_add_form_fields', [__CLASS__,'cat_add_fields']);
@@ -348,6 +350,25 @@ final class DS_Keywords {
 }</code></pre>
                                 </div>
                             </details>
+                            <details style="margin-top:6px">
+                                <summary><strong>Follow‑ups gating & poll throttle</strong></summary>
+                                <div style="margin-top:8px; max-width:860px">
+                                    <p>Use this to let upstream tasks "settle" and run big, single follow‑up batches later (saves credits), and to reduce polling frequency.</p>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>followups_mode</code>: <code>"immediate"</code> (run follow‑ups as soon as Ideas complete) or <code>"gated"</code> (wait until most Ideas are done or timeout).</li>
+                                        <li><code>settle_hours</code> (int): maximum wait window for the gate (e.g., 24–48). After this, follow‑ups run even if some Ideas stragglers remain.</li>
+                                        <li><code>min_ready_ratio</code> (0..1): run early once ≥ this fraction of Ideas tasks are completed for the term/lang (e.g., 0.9).</li>
+                                        <li><code>poll_min_interval_minutes</code> (int): throttle for the 5‑minute poller; when set (e.g., 600 = 10h), poll cycles are skipped until this interval elapses.</li>
+                                    </ul>
+                                    <p><strong>Example — slow & cheap (batch late):</strong></p>
+                                    <pre style="white-space:pre-wrap"><code>{
+  "followups_mode": "gated",
+  "settle_hours": 48,
+  "min_ready_ratio": 0.95,
+  "poll_min_interval_minutes": 600
+}</code></pre>
+                                </div>
+                            </details>
                         </td>
                     </tr>
                     <tr>
@@ -570,6 +591,37 @@ final class DS_Keywords {
         }
         echo '</details>';
         echo '</div>';
+
+        // FAQs (PAA) preview
+        $tf = self::table_faq();
+        echo '<div style="margin-top:12px">';
+        echo '<details><summary><strong>Saved FAQs (PAA) preview</strong> <span style="color:#888">(per language)</span></summary>';
+        foreach ($langs as $lang){
+            $tid_lang = self::translate_term_id($tid, $lang);
+            $faq_count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tf} WHERE term_id=%d AND lang=%s", $tid_lang, $lang));
+            echo '<div style="margin:8px 0 16px">';
+            echo '<h4 style="margin:4px 0">'.esc_html(strtoupper($lang)).' — '.number_format_i18n($faq_count).' Q/A</h4>';
+            if ($faq_count === 0){
+                echo '<em>No FAQs saved yet for this language.</em>';
+            } else {
+                $rows = $wpdb->get_results($wpdb->prepare("SELECT question, COALESCE(answer,'') answer, updated_at FROM {$tf} WHERE term_id=%d AND lang=%s ORDER BY updated_at DESC LIMIT 30", $tid_lang, $lang), ARRAY_A);
+                echo '<table class="widefat fixed" style="font-size:12px"><thead><tr><th style="width:55%">Question</th><th>Answer (snippet)</th><th>Updated</th></tr></thead><tbody>';
+                foreach ($rows as $r){
+                    $ans = $r['answer']; if (mb_strlen($ans) > 140) { $ans = mb_substr($ans, 0, 140).'…'; }
+                    echo '<tr>';
+                    echo '<td>'.esc_html($r['question']).'</td>';
+                    echo '<td>'.esc_html($ans).'</td>';
+                    echo '<td>'.esc_html($r['updated_at']).'</td>';
+                    echo '</tr>';
+                }
+                echo '</tbody></table>';
+                $logs_url = admin_url('admin.php?page=ds-keywords-logs&endpoint=serp%2Fgoogle%2Forganic&term_id='.(int)$tid_lang.'&lang='.rawurlencode($lang));
+                echo '<p><a class="button" href="'.esc_url($logs_url).'">Open PAA logs for this term/lang</a></p>';
+            }
+            echo '</div>';
+        }
+        echo '</details>';
+        echo '</div>';
         echo '</td></tr>';
     }
     public static function cat_save_fields($term_id){
@@ -640,6 +692,31 @@ final class DS_Keywords {
             echo '</tbody></table>';
         }
         echo '</div>';
+
+        // FAQs (PAA) aggregated from this product's categories
+        if ($lang && $term_ids){
+            $tf = self::table_faq();
+            $term_ids_lang = array_map(function($tid) use ($lang){ return self::translate_term_id((int)$tid, $lang); }, $term_ids);
+            $term_ids_lang = array_unique(array_map('intval', $term_ids_lang));
+            if (!empty($term_ids_lang)){
+                $in = implode(',', $term_ids_lang);
+                $rows = $wpdb->get_results($wpdb->prepare("SELECT question, COALESCE(answer,'') answer, updated_at FROM {$tf} WHERE lang=%s AND term_id IN ($in) ORDER BY updated_at DESC LIMIT 20", $lang), ARRAY_A);
+                echo '<div style="margin-top:12px">';
+                echo '<strong>FAQs (PAA)</strong>';
+                if (!$rows){
+                    echo '<br><em>No FAQs saved yet for this product\'s categories.</em>';
+                } else {
+                    echo '<table class="widefat fixed" style="font-size:12px"><thead><tr><th style="width:55%">Question</th><th>Answer (snippet)</th><th>Updated</th></tr></thead><tbody>';
+                    foreach ($rows as $r){
+                        $ans = $r['answer']; if (mb_strlen($ans) > 140) { $ans = mb_substr($ans, 0, 140).'…'; }
+                        echo '<tr><td>'.esc_html($r['question']).'</td><td>'.esc_html($ans).'</td><td>'.esc_html($r['updated_at']).'</td></tr>';
+                    }
+                    echo '</tbody></table>';
+                }
+                echo '</div>';
+            }
+        }
+
         echo '<p><a href="'.esc_url(admin_url('admin.php?page=ds-keywords')).'" class="button">Open Keywords</a></p>';
     }
 
@@ -724,7 +801,7 @@ final class DS_Keywords {
                         $saved = self::save_ideas_items($items, $term_id_lang, $lang);
                         $saved_total += $saved; $posts++;
                         self::log_write('info','ideas live saved', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'handle_result','term_id'=>$term_id_lang,'lang'=>$lang,'response'=>['items'=>$saved]]);
-                        if ($saved > 0){ self::enqueue_followups_for_term_lang($term_id_lang, $lang); }
+                        if ($saved > 0){ self::maybe_trigger_followups($term_id_lang, $lang); }
                         $tasksPosted++;
                     }
                     if (!empty($groups)){
@@ -768,9 +845,20 @@ final class DS_Keywords {
 
     public static function cron_poll(){
         $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_poll: missing auth'); return; }
+        // Throttle polling to reduce API GETs (free but noisy); user can set to ~10h
+        $limits = self::get_limits();
+        $min_minutes = max(0, (int)($limits['poll_min_interval_minutes'] ?? 0));
+        if ($min_minutes > 0){
+            $last = (int) get_option('ds_kw_last_poll_unix', 0);
+            $nowu = time();
+            if ($last > 0 && ($nowu - $last) < ($min_minutes * 60)){
+                self::log_write('info','cron_poll: skip (throttled)', ['action'=>'cron_poll','message'=>'poll_skip (throttled)','response'=>['since_sec'=>$nowu-$last,'min_interval_min'=>$min_minutes]]);
+                return;
+            }
+            update_option('ds_kw_last_poll_unix', $nowu);
+        }
         self::log_write('info','cron_poll: start', ['action'=>'cron_poll']);
         // Forecasts (optional)
-        $limits = self::get_limits();
         $should_poll_forecast = !empty($limits['forecast_enable']);
         $ideas_mode = self::get_mode('ideas_mode');
         $related_mode = self::get_mode('related_mode');
@@ -908,7 +996,12 @@ final class DS_Keywords {
                 'related_mode' => 'async',
                 'volume_mode' => 'async',
                 'forecast_mode' => 'async',
-                'paa_mode' => 'async'
+                'paa_mode' => 'async',
+                // Follow-ups gating & polling throttle
+                'followups_mode' => 'immediate', // 'immediate' or 'gated'
+                'settle_hours' => 24,
+                'min_ready_ratio' => 0.9,
+                'poll_min_interval_minutes' => 600 // 10 hours
         ];
         return array_replace($def, $arr);
     }
@@ -1146,7 +1239,13 @@ final class DS_Keywords {
             if ($row['status'] !== 'completed') { $just_completed = true; }
             $wpdb->update($tq, ['status'=>'completed','result_json'=>substr(wp_json_encode($result),0,20000),'updated_at'=>$now], ['id'=>(int)$row['id']]);
         }
-        if ($term_id && $lang && $just_completed){ self::enqueue_followups_for_term_lang($term_id, $lang); }
+        if ($term_id && $lang && $just_completed){
+            $meta_key = 'ds_kw_ideas_first_done_'.$lang;
+            if (!get_term_meta($term_id, $meta_key, true)){
+                update_term_meta($term_id, $meta_key, $now);
+            }
+            self::maybe_trigger_followups($term_id, $lang);
+        }
     }
 
     private static function enqueue_followups_for_term_lang($term_id, $lang){
@@ -1244,12 +1343,16 @@ final class DS_Keywords {
             }
         }
 
-        // Build deduped pool for intent & volume
-        $pool_rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT keyword FROM {$tk} WHERE term_id=%d AND lang=%s", $term_id, $lang), ARRAY_A);
-        $pool = array_values(array_unique(array_map(function($r){ return (string)$r['keyword']; }, $pool_rows)));
-        if ($pool){
-            // ---- INTENT (LIVE) ----
-            $intent_chunks = array_chunk($pool, 1000);
+        // Build delta pools for intent & volume (process only missing data)
+        $intent_rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT keyword FROM {$tk} WHERE term_id=%d AND lang=%s AND (intent_main IS NULL OR intent_main='')", $term_id, $lang), ARRAY_A);
+        $volume_rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT keyword FROM {$tk} WHERE term_id=%d AND lang=%s AND volume IS NULL", $term_id, $lang), ARRAY_A);
+        $pool_intent = array_values(array_unique(array_map(function($r){ return (string)$r['keyword']; }, $intent_rows)));
+        $pool_volume = array_values(array_unique(array_map(function($r){ return (string)$r['keyword']; }, $volume_rows)));
+        self::log_write('info','followups plan (delta)', ['endpoint'=>'ds-followups','action'=>'plan','term_id'=>$term_id,'lang'=>$lang,'response'=>['intent_missing'=>count($pool_intent),'volume_missing'=>count($pool_volume)]]);
+
+        // ---- INTENT (LIVE) ----
+        if (!empty($pool_intent)){
+            $intent_chunks = array_chunk($pool_intent, 1000);
             foreach ($intent_chunks as $ch){
                 $payload = [[ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ]];
                 list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/search_intent/live', $payload, $auth);
@@ -1262,10 +1365,12 @@ final class DS_Keywords {
                     }
                 }
             }
+        }
 
-            // ---- VOLUME (ASYNC or LIVE) ----
+        // ---- VOLUME (ASYNC or LIVE) ----
+        if (!empty($pool_volume)){
             $per_task = max(1, (int)($limits['volume_keywords_per_task'] ?? 1000));
-            $chunks = array_chunk($pool, $per_task);
+            $chunks = array_chunk($pool_volume, $per_task);
             $mode = self::get_mode('volume_mode');
             if ($mode === 'live'){
                 $saved_total = 0; $posted = 0; $errors = 0;
@@ -1623,4 +1728,61 @@ final class DS_Keywords {
         }
         return $ins;
     }
+
+    // ----- Follow-ups gating helpers -----
+    private static function maybe_trigger_followups($term_id, $lang, $from_scheduler = false){
+        $limits = self::get_limits();
+        $mode = isset($limits['followups_mode']) ? strtolower((string)$limits['followups_mode']) : 'immediate';
+        if ($mode !== 'gated'){
+            // immediate mode: run now
+            self::enqueue_followups_for_term_lang($term_id, $lang);
+            return;
+        }
+        $settle_hours = max(1, (int)($limits['settle_hours'] ?? 24));
+        $min_ready_ratio = max(0, min(1, (float)($limits['min_ready_ratio'] ?? 0.9)));
+        global $wpdb; $tq = self::table_queue();
+        // Count ideas tasks for this term/lang
+        $endpoint = 'keywords_data/google_ads/keywords_for_keywords';
+        $posted = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tq} WHERE endpoint=%s AND term_id=%d AND lang=%s AND status='posted'", $endpoint, $term_id, $lang));
+        $done   = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tq} WHERE endpoint=%s AND term_id=%d AND lang=%s AND status='completed'", $endpoint, $term_id, $lang));
+        $total = $posted + $done;
+        $first_key = 'ds_kw_ideas_first_done_'.$lang;
+        $first_done = (string) get_term_meta($term_id, $first_key, true);
+        $age_hours = 0;
+        if ($first_done){ $age_hours = max(0, (time() - strtotime($first_done)) / 3600.0); }
+        $ratio = 0.0;
+        if ($total > 0){ $ratio = $done / max(1, $total); }
+        else { $ratio = $first_done ? 1.0 : 0.0; }
+
+        $open = false;
+        if ($ratio >= $min_ready_ratio) $open = true;
+        if (!$open && $first_done && $age_hours >= $settle_hours) $open = true;
+
+        if ($open){
+            self::log_write('info','followups run (gate open)', ['endpoint'=>'ds-followups','action'=>'gate_run','term_id'=>$term_id,'lang'=>$lang,'response'=>['posted'=>$posted,'completed'=>$done,'ratio'=>$ratio,'age_h'=>$age_hours]]);
+            self::enqueue_followups_for_term_lang($term_id, $lang);
+            update_term_meta($term_id, 'ds_kw_followups_ran_'.$lang, current_time('mysql'));
+        } else {
+            // schedule a re-check
+            $delay_min = max(30, min( (int)($settle_hours*60/4), 360 )); // 0.25 of settle, capped at 6h
+            self::schedule_gate_check($term_id, $lang, $delay_min);
+            self::log_write('info','followups defer (waiting for ideas)', ['endpoint'=>'ds-followups','action'=>'gate_defer','term_id'=>$term_id,'lang'=>$lang,'response'=>['remaining'=>$posted,'ratio'=>$ratio,'age_h'=>$age_hours,'next_check_min'=>$delay_min]]);
+        }
+    }
+
+    private static function schedule_gate_check($term_id, $lang, $delay_minutes){
+        $hook = 'ds_keywords_gate_check';
+        // Avoid duplicate schedules for same args
+        $ts = wp_next_scheduled($hook, [$term_id, $lang]);
+        if ($ts === false){
+            wp_schedule_single_event(time() + max(1,$delay_minutes)*60, $hook, [$term_id, $lang]);
+            self::log_write('info','gate_check scheduled', ['endpoint'=>'ds-followups','action'=>'gate_schedule','term_id'=>$term_id,'lang'=>$lang,'response'=>['delay_min'=>$delay_minutes]]);
+        }
+    }
+
+    public static function gate_check_handler($term_id, $lang){
+        // Re-evaluate gate for this term/lang
+        self::maybe_trigger_followups((int)$term_id, (string)$lang, true);
+    }
 }
+

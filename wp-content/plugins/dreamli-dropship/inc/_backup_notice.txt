@@ -1,0 +1,1 @@
+This file is a placeholder to note that code changes were applied by the assistant in class-keywords.php implementing follow-ups gating and poll throttling.
