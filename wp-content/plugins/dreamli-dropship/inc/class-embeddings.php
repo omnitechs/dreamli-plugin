@@ -31,6 +31,8 @@ final class DS_Embeddings {
         // Settings UI
         add_action('admin_menu', [__CLASS__, 'settings_page'], 25);
         add_action('admin_init', [__CLASS__, 'register_settings']);
+        // Ensure schema upgrades on load (idempotent)
+        add_action('init', [__CLASS__, 'ensure_schema']);
 
         // Metaboxes (Products + Posts)
         add_action('add_meta_boxes_product', [__CLASS__, 'add_metabox_product']);
@@ -199,6 +201,8 @@ final class DS_Embeddings {
             language VARCHAR(12) NULL,
             vector_store_id VARCHAR(64) NULL,
             file_id VARCHAR(64) NULL,
+            pending_file_id VARCHAR(64) NULL,
+            old_file_id VARCHAR(64) NULL,
             batch_id VARCHAR(64) NULL,
             checksum CHAR(64) NULL,
             status VARCHAR(20) NOT NULL DEFAULT 'new',
@@ -213,6 +217,11 @@ final class DS_Embeddings {
             KEY vs_idx (vector_store_id)
         ) $charset;";
         dbDelta($sql1);
+        // Idempotent column additions for upgrades
+        $col = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$t1} LIKE %s", 'pending_file_id'));
+        if (!$col) { $wpdb->query("ALTER TABLE {$t1} ADD COLUMN pending_file_id VARCHAR(64) NULL AFTER file_id"); }
+        $col2 = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$t1} LIKE %s", 'old_file_id'));
+        if (!$col2) { $wpdb->query("ALTER TABLE {$t1} ADD COLUMN old_file_id VARCHAR(64) NULL AFTER pending_file_id"); }
 
         $t2 = self::table_batches();
         $sql2 = "CREATE TABLE {$t2} (
@@ -530,7 +539,7 @@ final class DS_Embeddings {
         if (!$rows) { self::log('Batch: no dirty rows to process.'); return; }
 
         $file_ids = [];
-        $processed_docs = [];
+        $uploaded_doc_ids = [];
         foreach ($rows as $row){
             // Build JSON content
             $json = self::build_document_json($row);
@@ -540,9 +549,19 @@ final class DS_Embeddings {
             $max = (int) get_option(self::OPT_MAX_DOC_BYTES, 60000);
             if (strlen($json) > $max) $json = substr($json, 0, $max - 3) . '...';
 
+            // Versioned filename using checksum
+            $cs = isset($row->checksum) && $row->checksum ? (string)$row->checksum : substr(hash('sha256',$json),0,64);
+            $cs8 = substr($cs,0,8);
+            $filename = $row->doc_id.'-'.$cs8.'.json';
+
+            // Mark old file for later cleanup (safe replace): don't delete yet
+            if (!empty($row->file_id) && empty($row->old_file_id)) {
+                self::update_row($row->doc_id, ['old_file_id'=>$row->file_id]);
+            }
+
             // Upload file
             $code = null;
-            list($resp, $err) = self::http_multipart_file_create('https://api.openai.com/v1/files', $row->doc_id.'.json', $json, 'assistants', $code);
+            list($resp, $err) = self::http_multipart_file_create('https://api.openai.com/v1/files', $filename, $json, 'assistants', $code);
             if ($err || !$resp || empty($resp['id'])){
                 self::log('Upload failed doc='.$row->doc_id.' http='.(string)$code.' err='.substr((string)$err,0,160));
                 self::update_row($row->doc_id, ['status'=>self::ST_ERROR, 'last_error'=> (string)$err ]);
@@ -550,8 +569,10 @@ final class DS_Embeddings {
             }
             $file_id = (string)$resp['id'];
             self::log('Upload ok doc='.$row->doc_id.' file_id='.$file_id.' http='.(string)$code);
-            self::update_row($row->doc_id, ['file_id'=>$file_id, 'status'=>self::ST_INDEXING]);
+            // Do NOT overwrite file_id yet; store as pending and set status indexing
+            self::update_row($row->doc_id, ['pending_file_id'=>$file_id, 'status'=>self::ST_INDEXING, 'last_error'=>null]);
             $file_ids[] = $file_id;
+            $uploaded_doc_ids[] = $row->doc_id;
 
             if ((microtime(true)-$start) > $time_budget_sec) break;
         }
@@ -559,34 +580,35 @@ final class DS_Embeddings {
         if ($file_ids){
             // Attach via vector store batch
             $payload = [ 'file_ids' => array_values(array_unique($file_ids)) ];
-            $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/file_batches';
+            $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/batches';
             $code = null; list($resp, $err) = self::http_json('POST', $url, $payload, $code);
             if ($err || !$resp || empty($resp['id'])){
                 self::log('Attach failed vs_id='.$vs_id.' http='.(string)$code.' err='.substr((string)$err,0,160));
-                // Rollback statuses
-                foreach ($rows as $row){ if (in_array($row->file_id, $file_ids, true)) self::update_row($row->doc_id, ['status'=>self::ST_ERROR, 'last_error'=>'attach_failed: '.$err]); }
+                // Rollback statuses: leave existing file_id; clear pending
+                foreach ($uploaded_doc_ids as $doc_id){ self::update_row($doc_id, ['status'=>self::ST_ERROR, 'pending_file_id'=>null, 'last_error'=>'attach_failed: '.$err]); }
                 return;
             }
             $batch_id = (string)$resp['id'];
             self::log('Attach ok vs_id='.$vs_id.' batch_id='.$batch_id.' http='.(string)$code.' files='.count($file_ids));
             // Update rows with batch_id
-            foreach ($rows as $row){ if ($row->file_id && in_array($row->file_id, $file_ids, true)) self::update_row($row->doc_id, ['batch_id'=>$batch_id, 'status'=>self::ST_INDEXING]); }
+            foreach ($uploaded_doc_ids as $doc_id){ self::update_row($doc_id, ['batch_id'=>$batch_id, 'status'=>self::ST_INDEXING]); }
             // Record batch
             self::upsert_batch_row($vs_id, $batch_id, 'in_progress');
 
-            // Schedule poll in ~2 minutes
+            // Schedule poll in ~2 minutes, and a file-level safety poll in ~5 minutes
             if (function_exists('as_schedule_single_action')){
-                // Schedule a timed poll (visible as Pending) and also enqueue an immediate poll to get faster feedback.
                 as_schedule_single_action(time()+120, 'ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id], 'ds-embeddings');
                 if (function_exists('as_enqueue_async_action')) {
                     as_enqueue_async_action('ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id], 'ds-embeddings');
                 }
+                // Safety per-file poll
+                as_schedule_single_action(time()+300, 'ds_embeddings_poll_files', [], 'ds-embeddings');
             } elseif (function_exists('as_enqueue_async_action')) {
-                // Fallback: enqueue an immediate poll (no delay capability here)
                 as_enqueue_async_action('ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id], 'ds-embeddings');
+                as_enqueue_async_action('ds_embeddings_poll_files', [], 'ds-embeddings');
             } else {
-                // Final fallback: WP‑Cron
                 wp_schedule_single_event(time()+120, 'ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id]);
+                wp_schedule_single_event(time()+300, 'ds_embeddings_poll_files', []);
             }
         }
     }
@@ -601,10 +623,16 @@ final class DS_Embeddings {
     }
 
     public static function poll_batches_as($args){
-        $vs_id = isset($args['vector_store_id']) ? (string)$args['vector_store_id'] : get_option(self::OPT_VS_ID,'');
-        $batch_id = isset($args['batch_id']) ? (string)$args['batch_id'] : '';
-        if (!$vs_id || !$batch_id) { self::log('Poll skip: missing vs_id or batch_id'); return; }
-        $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/file_batches/'.rawurlencode($batch_id);
+        $vs_id   = isset($args['vector_store_id']) ? (string)$args['vector_store_id'] : get_option(self::OPT_VS_ID,'');
+        $batch_id= isset($args['batch_id']) ? (string)$args['batch_id'] : '';
+        if (!$vs_id || !$batch_id) {
+            // Try to recover: find last in-progress batch
+            global $wpdb; $tb = self::table_batches();
+            $rowb = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$tb} WHERE vector_store_id=%s AND status IN ('in_progress','queued','processing') ORDER BY updated_at DESC LIMIT 1", $vs_id));
+            if ($rowb && !empty($rowb->batch_id)) { $batch_id = (string)$rowb->batch_id; self::log('Poll recovery: using latest batch_id='.$batch_id); }
+            else { self::log('Poll skip: missing vs_id or batch_id'); return; }
+        }
+        $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/batches/'.rawurlencode($batch_id);
         $code=null; list($resp, $err) = self::http_json('GET',$url,null,$code);
         if ($err || !$resp){
             self::log('Poll error vs_id='.$vs_id.' batch_id='.$batch_id.' http='.(string)$code.' err='.substr((string)$err,0,160));
@@ -639,16 +667,37 @@ final class DS_Embeddings {
         $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$t} WHERE vector_store_id=%s AND batch_id=%s", $vs_id, $batch_id));
         if (!$rows) return;
         foreach ($rows as $row){
-            if (!$row->file_id) { self::update_row($row->doc_id, ['status'=>self::ST_ERROR,'last_error'=>'missing_file_id']); continue; }
-            $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/'.rawurlencode($row->file_id);
+            $fid = $row->pending_file_id ? $row->pending_file_id : $row->file_id;
+            if (!$fid) { self::update_row($row->doc_id, ['status'=>self::ST_ERROR,'last_error'=>'missing_file_id']); continue; }
+            $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/'.rawurlencode($fid);
             $code=null; list($resp, $err) = self::http_json('GET',$url,null,$code);
+            if ($code === 404){
+                // Not attached? Try single-file attach as fallback
+                $attach_url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files';
+                $payload = [ 'file_id' => $fid ]; $acode=null; list($aresp, $aerr) = self::http_json('POST',$attach_url,$payload,$acode);
+                if ($aerr){ self::update_row($row->doc_id, ['last_error'=>'attach_single_failed: '.substr((string)$aerr,0,160)]); continue; }
+                // Schedule another poll soon
+                if (function_exists('as_schedule_single_action')){
+                    as_schedule_single_action(time()+120, 'ds_embeddings_poll_batch', ['vector_store_id'=>$vs_id, 'batch_id'=>$batch_id], 'ds-embeddings');
+                }
+                continue;
+            }
             if ($err || !$resp){ self::update_row($row->doc_id, ['status'=>self::ST_ERROR,'last_error'=>'file_check_failed: '.$err]); continue; }
             $st = (string)($resp['status'] ?? '');
             if ($st === 'completed'){
-                self::update_row($row->doc_id, ['status'=>self::ST_INDEXED, 'last_synced'=>DS_Helpers::now(), 'last_error'=>null]);
+                // Promote pending to active if applicable
+                $data = ['status'=>self::ST_INDEXED, 'last_synced'=>DS_Helpers::now(), 'last_error'=>null];
+                if ($row->pending_file_id){ $data['file_id'] = $row->pending_file_id; $data['pending_file_id'] = null; }
+                self::update_row($row->doc_id, $data);
+                // Delete old file if exists
+                if (!empty($row->old_file_id)){
+                    $del_url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/'.rawurlencode($row->old_file_id);
+                    $dcode=null; list($dresp, $derr) = self::http_json('DELETE',$del_url,null,$dcode);
+                    self::update_row($row->doc_id, ['old_file_id'=>null]);
+                }
             } elseif ($st === 'failed') {
                 $le = (string)($resp['last_error'] ?? '');
-                self::update_row($row->doc_id, ['status'=>self::ST_ERROR, 'last_error'=>$le]);
+                self::update_row($row->doc_id, ['status'=>self::ST_ERROR, 'last_error'=>$le, 'pending_file_id'=>null]);
             } else {
                 // still processing; schedule another poll (2 minutes)
                 if (function_exists('as_schedule_single_action')){
@@ -945,6 +994,53 @@ final class DS_Embeddings {
         return true;
     }
     private static function release_lock($key='ds_embeddings_lock'){ delete_transient($key); }
+
+    public static function poll_files_as($args){
+        $vs_id = get_option(self::OPT_VS_ID,'');
+        if (!$vs_id) { self::log('Files poll skip: no Vector Store ID'); return; }
+        global $wpdb; $t = self::table_items();
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$t} WHERE vector_store_id=%s AND status=%s LIMIT %d", $vs_id, self::ST_INDEXING, 80));
+        if (!$rows){ self::log('Files poll: no rows in INDEXING state'); return; }
+        $still_processing = false;
+        foreach ($rows as $row){
+            $fid = $row->pending_file_id ? $row->pending_file_id : $row->file_id;
+            if (!$fid){ self::update_row($row->doc_id, ['status'=>self::ST_ERROR,'last_error'=>'missing_file_id']); continue; }
+            $url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/'.rawurlencode($fid);
+            $code=null; list($resp, $err) = self::http_json('GET',$url,null,$code);
+            if ($code === 404){
+                // Not attached? Try to attach it individually
+                $attach_url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files';
+                $payload = [ 'file_id' => $fid ]; $acode=null; list($aresp, $aerr) = self::http_json('POST',$attach_url,$payload,$acode);
+                if ($aerr){ self::update_row($row->doc_id, ['last_error'=>'attach_single_failed: '.substr((string)$aerr,0,160)]); }
+                $still_processing = true; // give it time
+                continue;
+            }
+            if ($err || !$resp){ self::update_row($row->doc_id, ['last_error'=>'file_poll_failed: '.substr((string)$err,0,160)]); $still_processing = true; continue; }
+            $st = (string)($resp['status'] ?? '');
+            if ($st === 'completed'){
+                $data = ['status'=>self::ST_INDEXED, 'last_synced'=>DS_Helpers::now(), 'last_error'=>null];
+                if ($row->pending_file_id){ $data['file_id'] = $row->pending_file_id; $data['pending_file_id'] = null; }
+                self::update_row($row->doc_id, $data);
+                if (!empty($row->old_file_id)){
+                    $del_url = 'https://api.openai.com/v1/vector_stores/'.rawurlencode($vs_id).'/files/'.rawurlencode($row->old_file_id);
+                    $dcode=null; list($dresp, $derr) = self::http_json('DELETE',$del_url,null,$dcode);
+                    self::update_row($row->doc_id, ['old_file_id'=>null]);
+                }
+            } elseif ($st === 'failed') {
+                $le = (string)($resp['last_error'] ?? '');
+                self::update_row($row->doc_id, ['status'=>self::ST_ERROR, 'last_error'=>$le, 'pending_file_id'=>null]);
+            } else {
+                $still_processing = true; // queued/in_progress
+            }
+        }
+        if ($still_processing){
+            if (function_exists('as_schedule_single_action')){
+                as_schedule_single_action(time()+180, 'ds_embeddings_poll_files', [], 'ds-embeddings');
+            } else if (function_exists('as_enqueue_async_action')){
+                as_enqueue_async_action('ds_embeddings_poll_files', [], 'ds-embeddings');
+            } else {
+                wp_schedule_single_event(time()+180, 'ds_embeddings_poll_files', []);
+            }
+        }
+    }
 }
-
-
