@@ -36,6 +36,9 @@ final class DS_Settings {
             'claim_fee_min_eur' => 0.00,
             'claim_fee_cache_minutes' => 60,
             'claim_fee_statuses' => ['processing','completed'],
+            // --- Claim limits & expiry
+            'claim_unpublished_limit' => 3,
+            'claim_expire_days' => 3,
             // --- Moderation
             'posts_pending'    => 1,
             'products_pending' => 1,

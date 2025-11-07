@@ -87,7 +87,9 @@ final class DS_Admin_Menus {
                 'pe_waste_rate','pe_fail_risk_rate','pe_electricity_kwh','pe_printer_power_w',
                 'pe_labor_rate','pe_labor_fixed_min','pe_packaging','pe_misc',
                 'pe_dep_full','pe_oh_full','pe_dep_market','pe_oh_market',
-                'pe_profit_hint_full','pe_profit_hint_market','pe_materials'
+                'pe_profit_hint_full','pe_profit_hint_market','pe_materials',
+                // Claim limits & expiry
+                'claim_unpublished_limit','claim_expire_days'
             ];
 
             $new = [];
@@ -127,6 +129,11 @@ final class DS_Admin_Menus {
                     if ($f === 'drive_batch_size') { $iv = max(1, min(100, $iv)); }
                     if ($f === 'drive_weekly_hour') { $iv = max(0, min(23, $iv)); }
                     if ($f === 'drive_weekly_dow') { $iv = max(-1, min(6, $iv)); }
+                    $new[$f] = $iv;
+                } elseif (in_array($f, ['claim_unpublished_limit','claim_expire_days'], true)) {
+                    $iv = (int)$val;
+                    if ($f === 'claim_unpublished_limit') { $iv = max(0, min(1000, $iv)); }
+                    if ($f === 'claim_expire_days') { $iv = max(1, min(365, $iv)); }
                     $new[$f] = $iv;
                 } else {
                     $new[$f] = is_numeric($val) ? (float)$val : sanitize_text_field($val);
@@ -349,6 +356,12 @@ final class DS_Admin_Menus {
                  &nbsp; Min fee (€): <input type="number" step="0.01" min="0" name="claim_fee_min_eur" value="<?php echo esc_attr($s['claim_fee_min_eur']); ?>">
                  &nbsp; Cache (min): <input type="number" step="1" min="1" name="claim_fee_cache_minutes" value="<?php echo esc_attr($s['claim_fee_cache_minutes']); ?>">
               </p>
+            </div>
+
+            <h2 style="margin-top:24px;">Claim Limits &amp; Expiry</h2>
+            <div style="background:#fff;border:1px solid #eee;padding:10px;max-width:900px;">
+              <p>Max unpublished products per vendor: <input type="number" step="1" min="0" name="claim_unpublished_limit" value="<?php echo esc_attr($s['claim_unpublished_limit']); ?>"> <small>0 = unlimited</small></p>
+              <p>Auto-expire un‑published claims after (days): <input type="number" step="1" min="1" name="claim_expire_days" value="<?php echo esc_attr($s['claim_expire_days']); ?>"> <small>When a vendor holds a claimed product unpublished for longer than this, it returns to the pool.</small></p>
             </div>
 
             <h2 style="margin-top:24px;">View Payouts</h2>

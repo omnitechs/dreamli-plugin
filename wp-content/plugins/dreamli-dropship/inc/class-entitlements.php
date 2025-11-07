@@ -42,6 +42,10 @@ final class DS_Entitlements {
 		add_action('init', [__CLASS__, 'schedule_cron']);
 		add_action('ds_entitlements_daily', [__CLASS__, 'run_monthly_if_needed']);
 		add_action('ds_entitlements_enforce', [__CLASS__, 'run_enforce']);
+		// Claim expiry (hourly)
+		add_action('ds_claim_expiry', [__CLASS__, 'run_claim_expiry']);
+		// Clear claim flags when product is published
+		add_action('transition_post_status', [__CLASS__, 'on_status_transition'], 10, 3);
 
 		// Vendor actions
 		add_action('admin_post_ds_entitlement_confirm', [__CLASS__, 'handle_confirm']);
@@ -223,9 +227,22 @@ final class DS_Entitlements {
         ];
     }
 
-    public static function claim_fee_amount(int $product_id) : float {
-        $b = self::claim_fee_breakdown($product_id); return (float)$b['amount'];
-    }
+   	public static function claim_fee_amount(int $product_id) : float {
+		$b = self::claim_fee_breakdown($product_id); return (float)$b['amount'];
+	}
+
+	/** Count how many unpublished products (draft/pending/private) the user currently holds */
+	public static function user_unpublished_count(int $user_id) : int {
+		$q = new WP_Query([
+			'post_type' => 'product',
+			'post_status' => ['private','pending','draft'],
+			'author' => (int)$user_id,
+			'fields' => 'ids',
+			'nopaging' => true,
+			'no_found_rows' => true,
+		]);
+		return (int)$q->found_posts;
+	}
 
 	public static function schedule_cron() {
 		if (!wp_next_scheduled('ds_entitlements_daily')) {
@@ -233,6 +250,9 @@ final class DS_Entitlements {
 		}
 		if (!wp_next_scheduled('ds_entitlements_enforce')) {
 			wp_schedule_event(time() + 600, 'hourly', 'ds_entitlements_enforce');
+		}
+		if (!wp_next_scheduled('ds_claim_expiry')) {
+			wp_schedule_event(time() + 900, 'hourly', 'ds_claim_expiry');
 		}
 	}
 
@@ -402,6 +422,13 @@ final class DS_Entitlements {
 			update_post_meta($pid, '_ds_last_claim_fee_eur', $amount);
 		}
 
+		// Enforce unpublished limit
+		$limit = isset($s['claim_unpublished_limit']) ? (int)$s['claim_unpublished_limit'] : 3;
+		if ($limit > 0) {
+			$used = (int) self::user_unpublished_count($uid);
+			if ($used >= $limit) { self::redirect_back('claim','limit'); return; }
+		}
+
 		// Transfer ownership
 		wp_update_post(['ID'=>$pid, 'post_author'=>$uid]);
 		delete_post_meta($pid, '_ds_pool');
@@ -434,6 +461,9 @@ final class DS_Entitlements {
 		update_post_meta($product_id, '_ds_pool', 1);
 		update_post_meta($product_id, '_ds_pool_since', DS_Helpers::now());
 		update_post_meta($product_id, '_ds_pool_prev_owner', $prev_owner);
+		// Clear claim flags when moved to pool
+		delete_post_meta($product_id, '_ds_pool_claimed_by');
+		delete_post_meta($product_id, '_ds_pool_claimed_at');
 		// Auto-pause campaigns not owned by new holder if enabled
 		if (!empty($s['ads_autopause_on_entitlement_loss']) && class_exists('DS_Ads') && method_exists('DS_Ads','pause_campaigns_for_product_except')) {
 			DS_Ads::pause_campaigns_for_product_except($product_id, $pool_uid);
@@ -599,7 +629,47 @@ final class DS_Entitlements {
 		if ($target>0 && class_exists('DS_Ads') && method_exists('DS_Ads','pause_campaigns_for_product_except')) { DS_Ads::pause_campaigns_for_product_except($product_id, $target); }
 	}
 
-	public static function handle_bulk_form(){
+ public static function run_claim_expiry(){
+ 		$s = DS_Settings::get();
+ 		$days = isset($s['claim_expire_days']) ? (int)$s['claim_expire_days'] : 3;
+ 		if ($days <= 0) return;
+ 		$now_ts = current_time('timestamp');
+ 		$q = new WP_Query([
+ 			'post_type' => 'product',
+ 			'post_status' => ['private','pending','draft'],
+ 			'posts_per_page' => 200,
+ 			'fields' => 'ids',
+ 			'meta_query' => [
+ 				['key'=>'_ds_pool_claimed_by','compare'=>'EXISTS'],
+ 			],
+ 			'orderby' => 'date',
+ 			'order' => 'ASC',
+ 		]);
+ 		$posts = $q && isset($q->posts) ? (array)$q->posts : [];
+ 		foreach ($posts as $pid) {
+ 			$pid = (int)$pid;
+ 			$claimed_at = (string) get_post_meta($pid, '_ds_pool_claimed_at', true);
+ 			if (!$claimed_at) continue;
+ 			$ts = strtotime($claimed_at);
+ 			if (!$ts) continue;
+ 			if (($now_ts - $ts) >= ($days * DAY_IN_SECONDS)) {
+ 				$prev = (int) get_post_field('post_author', $pid);
+ 				self::forfeit_to_pool($pid, $prev);
+ 				delete_post_meta($pid, '_ds_pool_claimed_by');
+ 				delete_post_meta($pid, '_ds_pool_claimed_at');
+ 			}
+ 		}
+ 	}
+
+ 	public static function on_status_transition($new_status, $old_status, $post){
+ 		if (!is_object($post) || $post->post_type !== 'product') return;
+ 		if ($new_status === 'publish' && $old_status !== 'publish') {
+ 			delete_post_meta($post->ID, '_ds_pool_claimed_by');
+ 			delete_post_meta($post->ID, '_ds_pool_claimed_at');
+ 		}
+ 	}
+
+ 	public static function handle_bulk_form(){
 		if (!current_user_can('edit_others_products')) wp_die('No permission');
 		check_admin_referer('ds_ent_bulk');
 		$act = sanitize_text_field($_POST['bulk_action'] ?? '');

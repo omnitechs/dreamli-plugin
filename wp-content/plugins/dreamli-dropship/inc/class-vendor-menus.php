@@ -65,16 +65,23 @@ final class DS_Vendor_Menus {
     static function pool_page() {
         if (!is_user_logged_in()) wp_die('No access.');
         if (!(DS_Helpers::is_vendor() || DS_Helpers::is_vendor_admin())) wp_die('No access.');
+        $uid = get_current_user_id();
         $prods = class_exists('DS_Entitlements') ? DS_Entitlements::pool_products(100) : [];
         $claim_msg = isset($_GET['claim']) ? sanitize_text_field($_GET['claim']) : '';
-        $wallet_balance = DS_Wallet::balance(get_current_user_id());
+        $wallet_balance = DS_Wallet::balance($uid);
+        $s_now = DS_Settings::get();
+        $limit = isset($s_now['claim_unpublished_limit']) ? (int)$s_now['claim_unpublished_limit'] : 3;
+        $used  = class_exists('DS_Entitlements') ? DS_Entitlements::user_unpublished_count($uid) : 0;
+        $cap_reached = ($limit > 0) ? ($used >= $limit) : false;
         echo '<div class="wrap"><h1>Product Pool</h1>';
         if ($claim_msg) {
-            $map = [ 'ok'=>'Product claimed successfully.', 'not_in_pool'=>'This product is not in pool anymore.', 'insufficient'=>'Insufficient balance to claim this product.' ];
+            $map = [ 'ok'=>'Product claimed successfully.', 'not_in_pool'=>'This product is not in pool anymore.', 'insufficient'=>'Insufficient balance to claim this product.', 'limit'=>'You have reached your unpublished products limit. Publish (approved by admin) or release items to claim more.' ];
             $text = isset($map[$claim_msg]) ? $map[$claim_msg] : $claim_msg;
             echo '<div class="notice notice-info"><p>'.esc_html($text).'</p></div>';
         }
+        $slots_txt = ($limit > 0) ? (intval($used).' / '.intval($limit)) : (''.intval($used).' / ∞');
         echo '<p>Products in the pool can be claimed by any vendor. Claiming may require a fee based on recent average sales per product. Your wallet balance: <b>€'.number_format($wallet_balance,2).'</b>.</p>';
+        echo '<p><b>Your unpublished products:</b> '.esc_html($slots_txt).'. <small>Unpublished means Draft, Pending, or Private. Pending items still count until an admin publishes them. Claims held unpublished are auto‑returned to the pool after '.intval($s_now['claim_expire_days'] ?? 3).' days.</small></p>';
         if (empty($prods)) { echo '<p>No products in pool.</p></div>'; return; }
         echo '<table class="widefat striped"><thead><tr><th>Product</th><th>Prev Owner</th><th>Since</th><th>Claim Fee</th><th>Action</th></tr></thead><tbody>';
         foreach ($prods as $pid) {
@@ -88,22 +95,27 @@ final class DS_Vendor_Menus {
             echo '<td>'.esc_html($title).'</td>';
             echo '<td>'.esc_html($prev_name).'</td>';
             echo '<td>'.esc_html($since ?: '-').'</td>';
-            $fee_txt = '—'; $can = true;
+            $fee_txt = '—'; $can = true; $reason = '';
             $s_now = DS_Settings::get();
             if (!empty($s_now['claim_fee_enable']) && class_exists('DS_Entitlements') && method_exists('DS_Entitlements','claim_fee_breakdown')) {
                 $bd = DS_Entitlements::claim_fee_breakdown((int)$pid);
                 $fee = isset($bd['amount']) ? (float)$bd['amount'] : 0.0;
                 $pct = isset($bd['percent']) ? (float)$bd['percent'] : 0.0;
                 $fee_txt = '€'.number_format($fee,2).' ('.number_format($pct,2).'%)';
-                if ($fee > 0 && $wallet_balance < $fee) { $can = false; }
+                if ($fee > 0 && $wallet_balance < $fee) { $can = false; $reason = 'balance'; }
             }
+            if ($cap_reached) { $can = false; $reason = 'limit'; }
             echo '<td>'.esc_html($fee_txt).'</td>';
             echo '<td>';
             if ($can) {
                 echo '<a class="button button-primary" href="'.esc_url($url).'" onclick="return confirm(\'Claim this product?\');">Claim</a>';
             } else {
-                $wallet_url = admin_url('admin.php?page=ds-my-wallet');
-                echo '<button class="button" disabled>Claim</button> <span style="color:#a00;">Insufficient balance</span> <a href="'.esc_url($wallet_url).'" class="button-link">Top up</a>';
+                if ($reason === 'limit') {
+                    echo '<button class="button" disabled>Claim</button> <span style="color:#a00;">Limit reached (unpublished: '.intval($used).' / '.($limit>0?intval($limit):'∞').')</span>';
+                } else {
+                    $wallet_url = admin_url('admin.php?page=ds-my-wallet');
+                    echo '<button class="button" disabled>Claim</button> <span style="color:#a00;">Insufficient balance</span> <a href="'.esc_url($wallet_url).'" class="button-link">Top up</a>';
+                }
             }
             echo '</td>';
             echo '</tr>';
