@@ -142,6 +142,13 @@ final class DS_Settings {
             'pe_profit_hint_full' => 16.0,
             'pe_profit_hint_market' => 12.0,
             'pe_materials' => $materials_default,
+
+            // --- Google Drive Importer
+            'drive_folder_id'   => '',
+            'drive_sa_json'     => '',
+            'drive_batch_size'  => 20,
+            'drive_weekly_hour' => 2,
+            'drive_weekly_dow'  => -1,
         ];
     }
 

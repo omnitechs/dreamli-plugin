@@ -45,6 +45,13 @@ final class DS_Roles {
                 'edit_others_posts' => true,
             ]);
         }
+        // Ensure vendors can read private products (Pool visibility)
+        foreach (['ds_vendor_curated','ds_vendor_open','ds_vendor_admin'] as $role_key) {
+            if ($r = get_role($role_key)) {
+                $r->add_cap('read_private_products');
+                $r->add_cap('read_private_posts');
+            }
+        }
     }
 
     static function limit_own_lists($q) {

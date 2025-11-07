@@ -240,6 +240,28 @@ final class DS_Embeddings {
         dbDelta($sql2);
     }
 
+    // Idempotent check on init to avoid fatals if schema is missing
+    public static function ensure_schema(){
+        // Fast, safe: only run install() if our tables are missing
+        try {
+            if (method_exists('DS_Helpers','db_table_exists')){
+                $missing = false;
+                $t1 = self::table_items();
+                if (!DS_Helpers::db_table_exists($t1)) { $missing = true; }
+                $t2 = self::table_batches();
+                if (!DS_Helpers::db_table_exists($t2)) { $missing = true; }
+                if ($missing) { self::install(); }
+            } else {
+                // Fallback: attempt install once (dbDelta is idempotent)
+                self::install();
+            }
+        } catch (\Throwable $e) {
+            if (method_exists(__CLASS__, 'log')) {
+                self::log('ensure_schema error: '.substr($e->getMessage(),0,180));
+            }
+        }
+    }
+
     /* ===================== Metaboxes ===================== */
     public static function add_metabox_product(){
         add_meta_box('ds-emb-status', __('Embeddings Status','dreamli-dropship'), [__CLASS__, 'render_metabox'], 'product', 'side', 'high');

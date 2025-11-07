@@ -34,6 +34,7 @@ require_once DS_PLUGIN_DIR . 'inc/class-entitlements.php';
 require_once DS_PLUGIN_DIR . 'inc/class-snapshots.php';
 require_once DS_PLUGIN_DIR . 'inc/class-keywords.php';
 require_once DS_PLUGIN_DIR . 'inc/class-embeddings.php';
+require_once DS_PLUGIN_DIR . 'inc/class-drive-importer.php';
 
 
 register_activation_hook(__FILE__, function () {
@@ -91,7 +92,8 @@ add_action('plugins_loaded', function () {
 	DS_Entitlements::init();
     DS_Snapshots::init();
     DS_Keywords::init();
-    DS_Embeddings::init();
+   	DS_Embeddings::init();
+	DS_Drive_Importer::init();
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }

@@ -39,6 +39,8 @@ final class DS_Admin_Menus {
             $fields = [
                 // Moderation
                 'posts_pending','products_pending','vendor_admin_publish_reward_eur',
+                // Drive Importer
+                'drive_folder_id','drive_sa_json','drive_batch_size','drive_weekly_hour','drive_weekly_dow',
 
                 // Curated credit
                 'curated_credit_enable','curated_credit_amount','credit_min_images','credit_min_words','credit_min_rankmath',
@@ -117,6 +119,15 @@ final class DS_Admin_Menus {
                     $try = json_decode(stripslashes($val), true);
                     $new[$f] = is_array($try) ? $try : $val;
 
+                } elseif ($f === 'drive_sa_json') {
+                    // Preserve JSON as pasted; do not over-sanitize
+                    $new[$f] = is_string($_POST[$f]) ? trim(wp_unslash($_POST[$f])) : '';
+                } elseif (in_array($f, ['drive_batch_size','drive_weekly_hour','drive_weekly_dow'], true)) {
+                    $iv = (int)$val;
+                    if ($f === 'drive_batch_size') { $iv = max(1, min(100, $iv)); }
+                    if ($f === 'drive_weekly_hour') { $iv = max(0, min(23, $iv)); }
+                    if ($f === 'drive_weekly_dow') { $iv = max(-1, min(6, $iv)); }
+                    $new[$f] = $iv;
                 } else {
                     $new[$f] = is_numeric($val) ? (float)$val : sanitize_text_field($val);
                 }
@@ -178,8 +189,105 @@ final class DS_Admin_Menus {
         ?>
         <div class="wrap">
           <h1>Dropship Settings</h1>
+
+          <?php
+          // Drive notices
+          if (isset($_GET['ds_drive_msg'])) {
+            $msg = sanitize_text_field($_GET['ds_drive_msg']);
+            $err = isset($_GET['ds_drive_err']) ? sanitize_text_field($_GET['ds_drive_err']) : '';
+            if ($msg === 'ok') {
+              echo '<div class="notice notice-success"><p>Drive connection OK.</p></div>';
+            } elseif ($msg === 'sync_started') {
+              echo '<div class="notice notice-info"><p>Drive sync started in the background.</p></div>';
+            } elseif ($msg === 'reset_ok') {
+              echo '<div class="notice notice-success"><p>Drive sync stopped and state cleared.</p></div>';
+            } elseif ($msg === 'clean_ok') {
+              echo '<div class="notice notice-success"><p>All Drive sync data purged and tasks unscheduled.</p></div>';
+            } else {
+              echo '<div class="notice notice-error"><p>Drive error: '.esc_html($err ?: $msg).'</p></div>';
+            }
+          }
+          ?>
+
+          <h2>Google Drive Importer</h2>
           <form method="post">
             <?php wp_nonce_field('ds_settings'); ?>
+            <table class="form-table" style="max-width:1000px;">
+              <tr>
+                <th scope="row">Root Folder ID</th>
+                <td>
+                  <input type="text" name="drive_folder_id" value="<?php echo esc_attr($s['drive_folder_id']); ?>" style="width:420px;">
+                  <p class="description">Example: 1_ZMEyR1nG4v4lesS_R7avfJngWlVvZtI</p>
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Service Account JSON</th>
+                <td>
+                  <textarea name="drive_sa_json" rows="8" style="width:100%;max-width:900px;" placeholder='{"type":"service_account",...}'><?php echo esc_textarea($s['drive_sa_json']); ?></textarea>
+                  <p class="description">Paste the full JSON key for a Google service account with access to the shared folder (see setup steps below).</p>
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Batch size</th>
+                <td>
+                  <input type="number" min="1" max="100" name="drive_batch_size" value="<?php echo esc_attr((int)$s['drive_batch_size']); ?>">
+                  <p class="description">Folders processed per minute during a sync (lower = less load). Default 20.</p>
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Weekly schedule</th>
+                <td>
+                  <label>Hour (site time): <input type="number" min="0" max="23" name="drive_weekly_hour" value="<?php echo esc_attr((int)$s['drive_weekly_hour']); ?>"></label>
+                  &nbsp; Day of week:
+                  <select name="drive_weekly_dow">
+                    <?php
+                      $dow = (int)$s['drive_weekly_dow'];
+                      $opts = [ -1=>'Any (anchor on first run)', 0=>'Sunday', 1=>'Monday', 2=>'Tuesday', 3=>'Wednesday', 4=>'Thursday', 5=>'Friday', 6=>'Saturday' ];
+                      foreach ($opts as $k=>$lbl) { echo '<option value="'.esc_attr($k).'" '.selected($dow,$k,false).'>'.esc_html($lbl).'</option>'; }
+                    ?>
+                  </select>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin-top:8px;">
+              <button class="button button-primary" name="ds_save" value="1">Save Settings</button>
+              &nbsp;
+              <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url('admin-post.php?action=ds_drive_test'), 'ds_drive_actions') ); ?>">Test Connection</a>
+              &nbsp;
+              <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url('admin-post.php?action=ds_drive_sync_now'), 'ds_drive_actions') ); ?>">Sync Now</a>
+              &nbsp;
+              <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url('admin-post.php?action=ds_drive_reset'), 'ds_drive_actions') ); ?>" onclick="return confirm('Stop the Google Drive sync and clear its state?');">Stop & Reset</a>
+              &nbsp;
+              <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url('admin-post.php?action=ds_drive_clean'), 'ds_drive_actions') ); ?>" onclick="return confirm('This will purge ALL Drive sync data (state, logs, locks) and unschedule tasks. Continue?');">Clean Drive Data</a>
+            </p>
+
+            <?php
+            // Recent logs
+            $log = get_option('ds_drive_log', []);
+            if (is_array($log) && !empty($log)) {
+              echo '<h3>Drive Import Logs (latest)</h3>';
+              echo '<table class="widefat striped" style="max-width:1000px;"><thead><tr><th>Time</th><th>Level</th><th>Event</th><th>Context</th></tr></thead><tbody>';
+              $last = array_slice($log, -50);
+              foreach ($last as $row) {
+                $t = !empty($row['t']) ? date_i18n('Y-m-d H:i:s', (int)$row['t']) : '';
+                $lvl = esc_html($row['level'] ?? '');
+                $msg = esc_html($row['msg'] ?? '');
+                $ctx = esc_html( wp_json_encode($row['ctx'] ?? []) );
+                echo '<tr><td>'.$t.'</td><td>'.$lvl.'</td><td>'.$msg.'</td><td><code style="white-space:pre-wrap">'.$ctx.'</code></td></tr>';
+              }
+              echo '</tbody></table>';
+            }
+            ?>
+
+            <h3>Setup steps (Service Account)</h3>
+            <ol style="max-width:900px;">
+              <li>In Google Cloud Console, create a project → Enable API: <b>Google Drive API</b>.</li>
+              <li>Create credentials → <b>Service account</b>. After creating, go to "Keys" → <b>Add key</b> → <b>Create new key</b> (JSON). Download it.</li>
+              <li>Copy the JSON contents and paste into <b>Service Account JSON</b> above.</li>
+              <li>Share your Drive root folder ID with the service account email (from the JSON), with <b>Viewer</b> access.</li>
+              <li>Click <b>Save Settings</b>, then <b>Test Connection</b>. Use <b>Sync Now</b> to run immediately; weekly runs occur automagically at the configured time.</li>
+            </ol>
 
             <h2>Moderation</h2>
             <p><label><input type="checkbox" name="posts_pending" value="1" <?php checked($s['posts_pending']); ?>> Vendor blog posts → <b>Pending</b></label></p>
