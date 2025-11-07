@@ -252,8 +252,102 @@ final class DS_Keywords {
                     <tr>
                         <th>Limits & Thresholds (JSON)</th>
                         <td>
-                            <textarea name="<?php echo esc_attr(self::OPT_LIMITS); ?>" rows="8" cols="80"><?php echo esc_textarea($limits); ?></textarea>
-                            <p class="description">Caps & batching settings for lowest cost.</p>
+                            <textarea name="<?php echo esc_attr(self::OPT_LIMITS); ?>" rows="10" cols="80"><?php echo esc_textarea($limits); ?></textarea>
+                            <p class="description">Caps, batching, and per-endpoint delivery modes.</p>
+                            <details style="margin-top:6px">
+                                <summary><strong>About delivery modes: live vs async</strong></summary>
+                                <div style="margin-top:8px; max-width:860px">
+                                    <p>Each endpoint can run in two modes:</p>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><strong>live</strong>: call DataForSEO <code>.../live</code> and save results immediately (best for testing).</li>
+                                        <li><strong>async</strong>: create tasks with <code>.../task_post</code> and let the poller fetch results later (best for production cost control and batching).</li>
+                                    </ul>
+                                    <p>Set these keys in the JSON to choose per-endpoint mode:</p>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>ideas_mode</code> for <code>keywords_for_keywords</code></li>
+                                        <li><code>related_mode</code> for <code>dataforseo_labs/google/related_keywords</code></li>
+                                        <li><code>volume_mode</code> for <code>google_ads/search_volume</code></li>
+                                        <li><code>forecast_mode</code> for <code>ad_traffic_by_keywords</code> (async only at the moment)</li>
+                                        <li><code>paa_mode</code> for <code>serp/google/organic (PAA)</code> (async only at the moment)</li>
+                                    </ul>
+                                    <p><strong>Notes</strong></p>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li>Intent uses Labs <code>search_intent/live</code> and is always live.</li>
+                                        <li>PAA and Forecasts do not have a live path implemented yet. Keep <code>paa_mode</code> and <code>forecast_mode</code> set to <code>"async"</code>.</li>
+                                        <li>In live mode the poller skips the endpoint unless there are existing posted tasks to finish. Skips are logged as <code>poll_skip</code> in Keywords Logs.</li>
+                                        <li>When <code>tasks_ready</code> returns empty, the poller automatically falls back to direct <code>task_get</code> for your queued task IDs and logs the exact IDs being checked.</li>
+                                    </ul>
+                                    <p style="margin-top:6px"><strong>Example — test/dev (don’t wait):</strong></p>
+                                    <pre style="white-space:pre-wrap"><code>{
+  "ideas_mode": "live",
+  "related_mode": "live",
+  "volume_mode": "live",
+  "forecast_mode": "async",
+  "paa_mode": "async"
+}</code></pre>
+                                    <p style="margin-top:6px"><strong>Example — production (cost-efficient batching):</strong></p>
+                                    <pre style="white-space:pre-wrap"><code>{
+  "ideas_mode": "async",
+  "related_mode": "async",
+  "volume_mode": "async",
+  "forecast_mode": "async",
+  "paa_mode": "async"
+}</code></pre>
+                                    <p>You can always switch these and click “Run now for all categories” to apply immediately.</p>
+                                </div>
+                            </details>
+                            <details style="margin-top:6px">
+                                <summary><strong>Expansion & long-tail controls</strong></summary>
+                                <div style="margin-top:8px; max-width:860px">
+                                    <p>Use these to increase coverage and capture long‑tails:</p>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>expansion_enable</code> (bool): enable Labs <code>related_keywords</code> expansion. Default: <code>true</code>.</li>
+                                        <li><code>expansion_candidates_cap</code> (int): how many top Ideas we expand per category. Higher values = more breadth. Suggested dev: 80–120; prod: 20–40.</li>
+                                        <li><code>expansion_token_filter</code> (bool): when <code>true</code>, only expand ideas that include a token from the category name (cheaper, more relevant). Set to <code>false</code> in dev to broaden.</li>
+                                        <li><code>expand_max_depth</code> (int): <code>1</code> = expand only Ideas; <code>2</code> = also expand top outputs from Related (multi‑hop). Default: <code>1</code>.</li>
+                                        <li><code>expand_related_limit_per_seed</code> (int): Labs results to request per seed (max 100). Default: <code>20</code>.</li>
+                                        <li><code>suggest_enable</code> (bool): use Labs <code>search_suggestions/live</code> (autocomplete) for long‑tails. Default: <code>false</code>.</li>
+                                        <li><code>suggest_limit_per_seed</code> (int): autocomplete items per seed. Default: <code>20</code>.</li>
+                                        <li><code>max_total_keywords_per_cat</code> (int): hard cap on saved keywords per term/lang to prevent runaway growth. Default: <code>500</code>.</li>
+                                    </ul>
+                                    <p style="margin-top:6px"><strong>Example — dev (broad):</strong></p>
+                                    <pre style="white-space:pre-wrap"><code>{
+  "expansion_enable": true,
+  "expansion_candidates_cap": 80,
+  "expansion_token_filter": false,
+  "expand_max_depth": 2,
+  "expand_related_limit_per_seed": 50,
+  "suggest_enable": true,
+  "suggest_limit_per_seed": 20,
+  "max_total_keywords_per_cat": 800
+}</code></pre>
+                                </div>
+                            </details>
+                            <details style="margin-top:6px">
+                                <summary><strong>Batching, caps & budgets</strong></summary>
+                                <div style="margin-top:8px; max-width:860px">
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>max_cats_per_run</code>, <code>max_tasks_per_run</code>: safety caps for a single refresh run.</li>
+                                        <li><code>ideas_seeds_per_task</code> (max 20), <code>volume_keywords_per_task</code> (max 1000): batching sizes per DataForSEO limits.</li>
+                                        <li><code>budget_cap_credits</code>: soft ceiling for estimated credits per run; the run will bail before exceeding it.</li>
+                                        <li><code>forecast_enable</code> (bool): enable Google Ads forecasts (async only). Costs extra.</li>
+                                        <li><code>min_ads_volume</code>, <code>max_ads_per_cat</code>: filters for the Ads candidates table in the product editor.</li>
+                                        <li><code>paa_max_seeds_per_cat</code>: number of PAA (FAQ) seeds to post per category (default 1 to keep costs low); results are visible in the Category admin preview (not auto‑injected on front‑end).</li>
+                                    </ul>
+                                    <p style="margin-top:6px"><strong>Example — production (cost‑controlled):</strong></p>
+                                    <pre style="white-space:pre-wrap"><code>{
+  "max_cats_per_run": 50,
+  "max_tasks_per_run": 1000,
+  "budget_cap_credits": 300,
+  "ideas_seeds_per_task": 20,
+  "volume_keywords_per_task": 1000,
+  "forecast_enable": false,
+  "min_ads_volume": 50,
+  "max_ads_per_cat": 50,
+  "paa_max_seeds_per_cat": 1
+}</code></pre>
+                                </div>
+                            </details>
                         </td>
                     </tr>
                     <tr>
@@ -445,6 +539,37 @@ final class DS_Keywords {
             echo '<a class="button" style="margin-left:6px" href="'.esc_url(add_query_arg(['ds_kw_action'=>'refresh_now','term_id'=>$tid,'lang'=>$lang,'_wpnonce'=>$nonce], $base)).'">Refresh now ['.esc_html($lang).']</a>';
         }
         echo '</p>';
+        // Saved keywords preview per language (top 100)
+        global $wpdb; $tk = self::table_keywords();
+        echo '<div style="margin-top:12px">';
+        echo '<details open><summary><strong>Saved keywords preview</strong> <span style="color:#888">(per language)</span></summary>';
+        foreach ($langs as $lang){
+            $tid_lang = self::translate_term_id($tid, $lang);
+            $count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tk} WHERE term_id=%d AND lang=%s", $tid_lang, $lang));
+            echo '<div style="margin:8px 0 16px">';
+            echo '<h4 style="margin:4px 0">'.esc_html(strtoupper($lang)).' — '.number_format_i18n($count).' items</h4>';
+            if ($count === 0){
+                echo '<em>No saved keywords yet for this language.</em>';
+            } else {
+                $rows = $wpdb->get_results($wpdb->prepare("SELECT keyword, source, COALESCE(volume,0) vol, COALESCE(intent_main,'') intent, updated_at FROM {$tk} WHERE term_id=%d AND lang=%s ORDER BY vol DESC, updated_at DESC LIMIT 100", $tid_lang, $lang), ARRAY_A);
+                echo '<table class="widefat fixed" style="font-size:12px"><thead><tr><th>Keyword</th><th>Vol</th><th>Intent</th><th>Source</th><th>Updated</th></tr></thead><tbody>';
+                foreach ($rows as $r){
+                    echo '<tr>';
+                    echo '<td>'.esc_html($r['keyword']).'</td>';
+                    echo '<td>'.esc_html((string)$r['vol']).'</td>';
+                    echo '<td>'.esc_html((string)$r['intent']).'</td>';
+                    echo '<td>'.esc_html((string)$r['source']).'</td>';
+                    echo '<td>'.esc_html($r['updated_at']).'</td>';
+                    echo '</tr>';
+                }
+                echo '</tbody></table>';
+                $logs_url = admin_url('admin.php?page=ds-keywords-logs&term_id='.(int)$tid_lang.'&lang='.rawurlencode($lang));
+                echo '<p><a class="button" href="'.esc_url($logs_url).'">Open logs for this term/lang</a></p>';
+            }
+            echo '</div>';
+        }
+        echo '</details>';
+        echo '</div>';
         echo '</td></tr>';
     }
     public static function cat_save_fields($term_id){
@@ -459,7 +584,8 @@ final class DS_Keywords {
 
     // ----- Metabox -----
     public static function add_metabox(){
-        add_meta_box('ds_keywords_box', 'Keyword Suggestions', [__CLASS__,'render_metabox'], 'product', 'side', 'default');
+        // Move from side to normal (full-width) and raise priority for a larger, more capable widget
+        add_meta_box('ds_keywords_box', 'Keyword Suggestions', [__CLASS__,'render_metabox'], 'product', 'normal', 'high');
     }
     public static function render_metabox($post){
         $post_id = $post->ID;
@@ -469,16 +595,16 @@ final class DS_Keywords {
         $items = [];
         if ($lang && $term_ids){
             $in = implode(',', array_map('intval',$term_ids));
-            $sql = $wpdb->prepare("SELECT keyword, volume, intent_main, cpc, competition FROM {$t} WHERE lang=%s AND term_id IN ($in) ORDER BY volume DESC LIMIT 50", $lang);
+            $sql = $wpdb->prepare("SELECT keyword, source, volume, intent_main, cpc, competition FROM {$t} WHERE lang=%s AND term_id IN ($in) ORDER BY volume DESC LIMIT 150", $lang);
             $items = $wpdb->get_results($sql, ARRAY_A);
         }
-        echo '<div style="max-height:240px; overflow:auto">';
+        echo '<div style="overflow:auto">';
         if (!$items){ echo '<em>No suggestions yet for this product\'s language/categories.</em>'; }
         else {
             echo '<strong>Suggestions</strong>';
-            echo '<table class="widefat fixed" style="font-size:12px"><thead><tr><th>Keyword</th><th>Vol</th><th>Intent</th></tr></thead><tbody>';
+            echo '<table class="widefat fixed" style="font-size:12px"><thead><tr><th>Keyword</th><th>Vol</th><th>Intent</th><th>Source</th></tr></thead><tbody>';
             foreach ($items as $row){
-                echo '<tr><td>'.esc_html($row['keyword']).'</td><td>'.esc_html((string)($row['volume']??'')) .'</td><td>'.esc_html((string)($row['intent_main']??'')) .'</td></tr>';
+                echo '<tr><td>'.esc_html($row['keyword']).'</td><td>'.esc_html((string)($row['volume']??'')) .'</td><td>'.esc_html((string)($row['intent_main']??'')) .'</td><td>'.esc_html((string)($row['source']??'')) .'</td></tr>';
             }
             echo '</tbody></table>';
         }
@@ -566,27 +692,68 @@ final class DS_Keywords {
                 $seedsCount += count($seeds);
 
                 $groups = array_chunk($seeds, $seeds_per_task);
-                foreach ($groups as $group){
-                    if ($tasksPosted >= $maxTasksPerRun) break;
-                    $tasks[] = [
+                $ideas_mode = self::get_mode('ideas_mode');
+                if ($ideas_mode === 'live'){
+                    $saved_total = 0; $errors = 0; $posts = 0;
+                    foreach ($groups as $group){
+                        if ($tasksPosted >= $maxTasksPerRun) break;
+                        $payload = [[
                             'keywords' => array_values($group),
                             'language_code' => $lang_code,
                             'location_code' => $loc_code,
                             'include_adult_keywords' => false,
                             'limit' => min(300, (int)$limits['max_ideas_per_cat'])
-                    ];
-                    $ctxs[] = ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','term_id'=>$term_id_lang,'lang'=>$lang,'tag'=>'ideas:'.$term_id_lang.':'.$lang];
-
-                    if (count($tasks) >= $max_per_batch_post){
-                        self::dfs_post_tasks('keywords_data/google_ads/keywords_for_keywords/task_post', $tasks, $ctxs, $auth);
-                        $tasksPosted += count($tasks); $tasks=[]; $ctxs=[];
+                        ]];
+                        self::log_write('info','ideas live request', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'live','term_id'=>$term_id_lang,'lang'=>$lang,'request'=>$payload]);
+                        list($json,$code,$err) = self::dfs_post('keywords_data/google_ads/keywords_for_keywords/live', $payload, $auth);
+                        if ($err || $code < 200 || $code >= 300){
+                            $errors++; self::log_write('warn','ideas live failed', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'live','term_id'=>$term_id_lang,'lang'=>$lang,'http_code'=>$code,'error'=>$err]);
+                            continue;
+                        }
+                        // Support both shapes from DFSEO live: (a) result[0].items[], (b) result[] item nodes
+                        $items = [];
+                        if (isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items'])) {
+                            $items = $json['tasks'][0]['result'][0]['items'];
+                        } elseif (isset($json['tasks'][0]['result']) && is_array($json['tasks'][0]['result'])) {
+                            $res = $json['tasks'][0]['result'];
+                            if (!empty($res) && isset($res[0]) && is_array($res[0]) && array_key_exists('keyword', $res[0])) {
+                                $items = $res;
+                            }
+                        }
+                        self::log_write('info','ideas live nodes', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'handle_result','term_id'=>$term_id_lang,'lang'=>$lang,'response'=>['nodes'=>is_array($items)?count($items):0]]);
+                        $saved = self::save_ideas_items($items, $term_id_lang, $lang);
+                        $saved_total += $saved; $posts++;
+                        self::log_write('info','ideas live saved', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'handle_result','term_id'=>$term_id_lang,'lang'=>$lang,'response'=>['items'=>$saved]]);
+                        if ($saved > 0){ self::enqueue_followups_for_term_lang($term_id_lang, $lang); }
+                        $tasksPosted++;
                     }
-                }
+                    if (!empty($groups)){
+                        $catsProcessed++;
+                        update_term_meta($term_id_lang, 'ds_kw_last_refresh_'.$lang, $now);
+                    }
+                } else {
+                    foreach ($groups as $group){
+                        if ($tasksPosted >= $maxTasksPerRun) break;
+                        $tasks[] = [
+                                'keywords' => array_values($group),
+                                'language_code' => $lang_code,
+                                'location_code' => $loc_code,
+                                'include_adult_keywords' => false,
+                                'limit' => min(300, (int)$limits['max_ideas_per_cat'])
+                        ];
+                        $ctxs[] = ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','term_id'=>$term_id_lang,'lang'=>$lang,'tag'=>'ideas:'.$term_id_lang.':'.$lang];
 
-                if (!empty($groups)){
-                    $catsProcessed++;
-                    // Mark attempt so concurrent runs skip
-                    update_term_meta($term_id_lang, 'ds_kw_last_refresh_'.$lang, $now);
+                        if (count($tasks) >= $max_per_batch_post){
+                            self::dfs_post_tasks('keywords_data/google_ads/keywords_for_keywords/task_post', $tasks, $ctxs, $auth);
+                            $tasksPosted += count($tasks); $tasks=[]; $ctxs=[];
+                        }
+                    }
+
+                    if (!empty($groups)){
+                        $catsProcessed++;
+                        // Mark attempt so concurrent runs skip
+                        update_term_meta($term_id_lang, 'ds_kw_last_refresh_'.$lang, $now);
+                    }
                 }
             }
         }
@@ -602,16 +769,50 @@ final class DS_Keywords {
     public static function cron_poll(){
         $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_poll: missing auth'); return; }
         self::log_write('info','cron_poll: start', ['action'=>'cron_poll']);
-        // Ideas
-        self::poll_endpoint_ready('keywords_data/google_ads/keywords_for_keywords', $auth, function($result){ self::handle_ideas_result($result); });
-        // Related expansion
-        self::poll_endpoint_ready('dataforseo_labs/google/related_keywords', $auth, function($result){ self::handle_related_result($result); });
-        // Volume
-        self::poll_endpoint_ready('keywords_data/google_ads/search_volume', $auth, function($result){ self::handle_volume_result($result); });
-        // PAA via SERP Organic (Advanced)
-        self::poll_endpoint_ready('serp/google/organic', $auth, function($result){ self::handle_paa_result($result); });
         // Forecasts (optional)
-        self::poll_endpoint_ready('keywords_data/google_ads/ad_traffic_by_keywords', $auth, function($result){ self::handle_forecast_result($result); });
+        $limits = self::get_limits();
+        $should_poll_forecast = !empty($limits['forecast_enable']);
+        $ideas_mode = self::get_mode('ideas_mode');
+        $related_mode = self::get_mode('related_mode');
+        $volume_mode = self::get_mode('volume_mode');
+        $forecast_mode = self::get_mode('forecast_mode');
+        $paa_mode = self::get_mode('paa_mode');
+
+        // Helper to decide polling per endpoint: skip in live mode if no posted tasks exist
+        $maybe_poll = function($endpoint_base) use ($auth){ return true; };
+
+        // Ideas
+        if (!($ideas_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/keywords_for_keywords'))){
+            self::poll_endpoint_ready('keywords_data/google_ads/keywords_for_keywords', $auth, function($result){ self::handle_ideas_result($result); });
+        } else {
+            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','action'=>'poll_skip']);
+        }
+        // Related expansion (Labs has no reliable tasks_ready; fallback will hit task_get by IDs). Skip if live and nothing posted.
+        if (!($related_mode === 'live' && !self::queue_has_posted('dataforseo_labs/google/related_keywords'))){
+            self::poll_endpoint_ready('dataforseo_labs/google/related_keywords', $auth, function($result){ self::handle_related_result($result); });
+        } else {
+            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'poll_skip']);
+        }
+        // Volume
+        if (!($volume_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/search_volume'))){
+            self::poll_endpoint_ready('keywords_data/google_ads/search_volume', $auth, function($result){ self::handle_volume_result($result); });
+        } else {
+            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'poll_skip']);
+        }
+        // PAA via SERP Organic (Advanced). If paa_mode is live (not implemented), skip polling unless posted.
+        if (!($paa_mode === 'live' && !self::queue_has_posted('serp/google/organic'))){
+            self::poll_endpoint_ready('serp/google/organic', $auth, function($result){ self::handle_paa_result($result); });
+        } else {
+            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'serp/google/organic','action'=>'poll_skip']);
+        }
+        // Forecasts (optional)
+        if ($should_poll_forecast){
+            if (!($forecast_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/ad_traffic_by_keywords'))){
+                self::poll_endpoint_ready('keywords_data/google_ads/ad_traffic_by_keywords', $auth, function($result){ self::handle_forecast_result($result); });
+            } else {
+                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/ad_traffic_by_keywords','action'=>'poll_skip']);
+            }
+        }
         self::log_write('info','cron_poll: done', ['action'=>'cron_poll']);
     }
 
@@ -693,7 +894,21 @@ final class DS_Keywords {
                 'max_ideas_per_cat'=>300,'max_ads_per_cat'=>50,'min_ads_volume'=>50,
                 'expansion_enable'=>true,'forecast_enable'=>false,'budget_cap_credits'=>1000,
                 'max_cats_per_run'=>50,'max_tasks_per_run'=>1000,
-                'ideas_seeds_per_task'=>20,'volume_keywords_per_task'=>1000,'paa_max_seeds_per_cat'=>1
+                'ideas_seeds_per_task'=>20,'volume_keywords_per_task'=>1000,'paa_max_seeds_per_cat'=>1,
+                // Expansion knobs
+                'expansion_candidates_cap' => 20,
+                'expansion_token_filter' => true,
+                'expand_max_depth' => 1, // 1 = only expand ideas; 2 = also expand top related outputs
+                'expand_related_limit_per_seed' => 20, // DFSEO Labs related limit per seed
+                'suggest_enable' => false, // use Labs search_suggestions
+                'suggest_limit_per_seed' => 20,
+                'max_total_keywords_per_cat' => 500,
+                // Modes: 'async' (post & poll) or 'live' (immediate)
+                'ideas_mode' => 'async',
+                'related_mode' => 'async',
+                'volume_mode' => 'async',
+                'forecast_mode' => 'async',
+                'paa_mode' => 'async'
         ];
         return array_replace($def, $arr);
     }
@@ -795,20 +1010,27 @@ final class DS_Keywords {
         self::log_write('info','Posted tasks: '.$ins_count, ['endpoint'=>$endpoint_base,'action'=>'post_tasks','response'=>['task_ids'=>$task_ids]]);
     }
 
+    private static function queue_has_posted($endpoint_base){
+        global $wpdb; $tq = self::table_queue();
+        $cnt = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tq} WHERE endpoint=%s AND status='posted'", $endpoint_base));
+        return $cnt > 0;
+    }
+
     private static function poll_endpoint_ready($endpoint_base, $auth, $handler){
         // SERP uses a consolidated /serp/tasks_ready endpoint.
         $tasks_ready_path = (strpos($endpoint_base, 'serp/') === 0)
                 ? 'serp/tasks_ready'
                 : $endpoint_base . '/tasks_ready';
 
+        // Ask DataForSEO which tasks are ready. If this fails or returns 0, we will still fall back to our queue.
         list($ready,$code,$err) = self::dfs_get($tasks_ready_path, $auth);
-        if ($err || $code < 200 || $code >= 300){
+        $http_ok = ($code >= 200 && $code < 300);
+        if (!$http_ok){
             self::log_write('warn','tasks_ready failed', ['endpoint'=>$endpoint_base,'action'=>'tasks_ready','http_code'=>$code,'error'=>$err]);
-            return;
         }
 
         $ready_tasks = [];
-        if (isset($ready['tasks']) && is_array($ready['tasks'])){
+        if ($http_ok && isset($ready['tasks']) && is_array($ready['tasks'])){
             foreach ($ready['tasks'] as $t){
                 if (!empty($t['result'])){
                     foreach ($t['result'] as $r){ if (!empty($r['id'])) $ready_tasks[] = $r['id']; }
@@ -816,8 +1038,43 @@ final class DS_Keywords {
             }
         }
         self::log_write('info','tasks_ready count: '.count($ready_tasks), ['endpoint'=>$endpoint_base,'action'=>'tasks_ready','response'=>['count'=>count($ready_tasks)]]);
-        if (!$ready_tasks) return;
 
+        // If DataForSEO doesn't return ready ids here (or tasks_ready failed), fall back to our own queue of posted tasks
+        if (!$ready_tasks){
+            global $wpdb; $tq = self::table_queue();
+            // Try a small batch of oldest posted tasks for this endpoint (older than 1 minute)
+            $fallback = $wpdb->get_col($wpdb->prepare(
+                "SELECT task_id FROM {$tq} WHERE endpoint=%s AND status='posted' AND created_at < DATE_SUB(NOW(), INTERVAL 1 MINUTE) ORDER BY created_at ASC LIMIT 20",
+                $endpoint_base
+            ));
+            if ($fallback){
+                self::log_write('info','fallback task_get from queue', ['endpoint'=>$endpoint_base,'action'=>'tasks_fallback','response'=>['count'=>count($fallback),'task_ids'=>$fallback]]);
+                foreach ($fallback as $tid){
+                    $get_path = (strpos($endpoint_base,'serp/google/organic')===0)
+                        ? $endpoint_base.'/task_get/advanced/'.rawurlencode($tid)
+                        : $endpoint_base.'/task_get/'.rawurlencode($tid);
+                    list($res,$code,$err) = self::dfs_get($get_path, $auth);
+                    if ($err || $code < 200 || $code >= 300){
+                        self::log_write('warn','task_get failed (fallback)', ['endpoint'=>$endpoint_base,'action'=>'task_get','task_id'=>$tid,'http_code'=>$code,'error'=>$err]);
+                        continue;
+                    }
+                    $nodes = isset($res['tasks'][0]['result']) && is_array($res['tasks'][0]['result']) ? $res['tasks'][0]['result'] : [];
+                    self::log_write('info','task_get nodes', ['endpoint'=>$endpoint_base,'action'=>'task_get','task_id'=>$tid,'response'=>['nodes'=>count($nodes)]]);
+                    foreach ($nodes as $node){
+                        if (is_array($node)) { $node['id'] = $tid; }
+                        $handler($node);
+                    }
+                    if (!$nodes){
+                        // Not ready yet; keep it as posted for next poll
+                        self::log_write('info','task_get no result yet (fallback)', ['endpoint'=>$endpoint_base,'action'=>'task_get','task_id'=>$tid,'response'=>$res]);
+                    }
+                }
+            }
+            // even if no fallback, nothing else to do
+            return;
+        }
+
+        // Normal ready path: fetch by ids returned from tasks_ready
         foreach ($ready_tasks as $tid){
             // For SERP Organic we need Advanced GET path
             $get_path = (strpos($endpoint_base,'serp/google/organic')===0)
@@ -829,8 +1086,11 @@ final class DS_Keywords {
                 self::log_write('warn','task_get failed', ['endpoint'=>$endpoint_base,'action'=>'task_get','task_id'=>$tid,'http_code'=>$code,'error'=>$err]);
                 continue;
             }
-            if (isset($res['tasks'][0]['result']) && is_array($res['tasks'][0]['result'])){
-                foreach ($res['tasks'][0]['result'] as $result){ $handler($result); }
+            $nodes = isset($res['tasks'][0]['result']) && is_array($res['tasks'][0]['result']) ? $res['tasks'][0]['result'] : [];
+            self::log_write('info','task_get nodes', ['endpoint'=>$endpoint_base,'action'=>'task_get','task_id'=>$tid,'response'=>['nodes'=>count($nodes)]]);
+            foreach ($nodes as $node){
+                if (is_array($node)) { $node['id'] = $tid; }
+                $handler($node);
             }
         }
     }
@@ -843,22 +1103,31 @@ final class DS_Keywords {
         $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$tq} WHERE endpoint=%s AND task_id=%s", 'keywords_data/google_ads/keywords_for_keywords', $task_id), ARRAY_A);
         $term_id = $row ? (int)$row['term_id'] : 0;
         $lang = $row ? (string)$row['lang'] : '';
-        $items = isset($result['items']) && is_array($result['items']) ? $result['items'] : [];
-        $ins = 0;
 
+        // Support both shapes: (a) container with 'items' array; (b) single item node
+        $items = [];
+        if (isset($result['items']) && is_array($result['items'])){
+            $items = $result['items'];
+        } elseif (isset($result['keyword'])) {
+            $items = [$result];
+        }
+        self::log_write('info','ideas nodes', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['nodes'=>is_array($items)?count($items):0]]);
+
+        $ins = 0;
         foreach ($items as $it){
             $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
             if ($kw==='') continue;
-            $volume = isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null;
-            $comp   = isset($it['keyword_info']['competition']) ? (float)$it['keyword_info']['competition'] : null;
-            $cpc    = isset($it['keyword_info']['cpc']) ? (float)$it['keyword_info']['cpc'] : null;
-            $bid_l  = isset($it['keyword_info']['low_top_of_page_bid']) ? (float)$it['keyword_info']['low_top_of_page_bid'] : null;
-            $bid_h  = isset($it['keyword_info']['high_top_of_page_bid']) ? (float)$it['keyword_info']['high_top_of_page_bid'] : null;
+            // Prefer top-level fields if present, else fall back to keyword_info
+            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
+            $comp   = isset($it['competition']) ? ( (string)$it['competition'] === 'LOW' || (string)$it['competition'] === 'MEDIUM' || (string)$it['competition'] === 'HIGH' ? null : (float)$it['competition'] ) : ( isset($it['keyword_info']['competition']) ? (float)$it['keyword_info']['competition'] : null );
+            $cpc    = isset($it['cpc']) ? (float)$it['cpc'] : ( isset($it['keyword_info']['cpc']) ? (float)$it['keyword_info']['cpc'] : null );
+            $bid_l  = isset($it['low_top_of_page_bid']) ? (float)$it['low_top_of_page_bid'] : ( isset($it['keyword_info']['low_top_of_page_bid']) ? (float)$it['keyword_info']['low_top_of_page_bid'] : null );
+            $bid_h  = isset($it['high_top_of_page_bid']) ? (float)$it['high_top_of_page_bid'] : ( isset($it['keyword_info']['high_top_of_page_bid']) ? (float)$it['keyword_info']['high_top_of_page_bid'] : null );
 
             $wpdb->query($wpdb->prepare(
                     "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, competition, cpc, top_of_page_bid_low, top_of_page_bid_high, created_at, updated_at)
                  VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                 ON DUPLICATE KEY UPDATE volume=VALUES(volume), competition=VALUES(competition), cpc=VALUES(cpc), top_of_page_bid_low=VALUES(top_of_page_bid_low), top_of_page_bid_high=VALUES(top_of_page_bid_high), updated_at=VALUES(updated_at)",
+                 ON DUPLICATE KEY UPDATE volume=COALESCE(VALUES(volume), volume), competition=COALESCE(VALUES(competition), competition), cpc=COALESCE(VALUES(cpc), cpc), top_of_page_bid_low=COALESCE(VALUES(top_of_page_bid_low), top_of_page_bid_low), top_of_page_bid_high=COALESCE(VALUES(top_of_page_bid_high), top_of_page_bid_high), updated_at=VALUES(updated_at)",
                     $term_id, $lang, $kw, 'ideas',
                     is_null($volume) ? null : $volume,
                     is_null($comp) ? null : $comp,
@@ -871,10 +1140,13 @@ final class DS_Keywords {
         }
 
         self::log_write('info','ideas result saved', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['items'=>$ins]]);
+
+        $just_completed = false;
         if ($row){
+            if ($row['status'] !== 'completed') { $just_completed = true; }
             $wpdb->update($tq, ['status'=>'completed','result_json'=>substr(wp_json_encode($result),0,20000),'updated_at'=>$now], ['id'=>(int)$row['id']]);
         }
-        if ($term_id && $lang){ self::enqueue_followups_for_term_lang($term_id, $lang); }
+        if ($term_id && $lang && $just_completed){ self::enqueue_followups_for_term_lang($term_id, $lang); }
     }
 
     private static function enqueue_followups_for_term_lang($term_id, $lang){
@@ -884,6 +1156,8 @@ final class DS_Keywords {
         $lang_code = (string)$map[$lang]['language_code'];
         $loc_code  = (int)$map[$lang]['location_code'];
         global $wpdb; $tk = self::table_keywords();
+        $related_total = 0; $volume_total = 0; $paa_total = 0; $forecast_total = 0;
+        self::log_write('info','followups start', ['endpoint'=>'ds-followups','action'=>'start','term_id'=>$term_id,'lang'=>$lang]);
 
         // Category seed tokens for cheap heuristic expansion
         $term = get_term($term_id, 'product_cat');
@@ -898,30 +1172,76 @@ final class DS_Keywords {
         ), ARRAY_A);
 
         $to_expand = [];
+        $expand_cap = max(1, (int)($limits['expansion_candidates_cap'] ?? 20));
+        $use_filter = !empty($limits['expansion_token_filter']);
         foreach ($rows as $r){
-            $kw = mb_strtolower($r['keyword']);
-            foreach ($seed_tokens as $tok){
-                if ($tok && mb_stripos($kw, $tok) !== false){ $to_expand[] = $r['keyword']; break; }
+            if (!$use_filter){
+                $to_expand[] = $r['keyword'];
+            } else {
+                $kw = mb_strtolower($r['keyword']);
+                foreach ($seed_tokens as $tok){
+                    if ($tok && mb_stripos($kw, $tok) !== false){ $to_expand[] = $r['keyword']; break; }
+                }
             }
-            if (count($to_expand) >= 10) break; // tighter cap to save cost
+            if (count($to_expand) >= $expand_cap) break; // cap via Limits JSON
         }
 
         // Related keywords (async, optional)
+        self::log_write('info','related candidates', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'plan','term_id'=>$term_id,'lang'=>$lang,'response'=>['candidates'=>count($to_expand)]]);
         if (!empty($to_expand) && !empty($limits['expansion_enable'])){
-            $tasks=[]; $ctxs=[]; $max_batch=100;
-            foreach ($to_expand as $kw){
-                $tasks[] = [
+            $mode = self::get_mode('related_mode');
+            if ($mode === 'live'){
+                $saved_total = 0; $posted = 0; $errors = 0;
+                foreach ($to_expand as $kw){
+                    $payload = [[
                         'keyword' => $kw,
                         'language_code' => $lang_code,
                         'location_code' => $loc_code,
                         'limit' => 100
-                ];
-                $ctxs[] = ['endpoint'=>'dataforseo_labs/google/related_keywords','term_id'=>$term_id,'lang'=>$lang,'tag'=>'related:'.$term_id.':'.$lang];
-                if (count($tasks) >= $max_batch){
-                    self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); $tasks=[]; $ctxs=[];
+                    ]];
+                    self::log_write('info','related live request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]);
+                    list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $payload, $auth);
+                    if ($err || $code < 200 || $code >= 300){
+                        $errors++; self::log_write('warn','related live failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang]);
+                        continue;
+                    }
+                    $items = isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items']) ? $json['tasks'][0]['result'][0]['items'] : [];
+                    $nodes_count = is_array($items)?count($items):0;
+                    $norm = [];
+                    if (is_array($items)){
+                        foreach ($items as $it){
+                            if (isset($it['keyword_data'])){
+                                $kd = $it['keyword_data'];
+                                $kw = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                                $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                                $norm[] = array_merge(['keyword'=>$kw], $info);
+                            } elseif (isset($it['keyword'])) {
+                                $norm[] = $it;
+                            }
+                        }
+                    }
+                    self::log_write('info','related live nodes', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['nodes'=>$nodes_count,'normalized'=>count($norm)]]);
+                    $saved = self::save_related_items($norm, $term_id, $lang);
+                    $saved_total += $saved; $posted++;
+                    self::log_write('info','related live saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]);
                 }
+                self::log_write('info','related live summary', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
+            } else {
+                $tasks=[]; $ctxs=[]; $max_batch=100;
+                foreach ($to_expand as $kw){
+                    $tasks[] = [
+                            'keyword' => $kw,
+                            'language_code' => $lang_code,
+                            'location_code' => $loc_code,
+                            'limit' => 100
+                    ];
+                    $ctxs[] = ['endpoint'=>'dataforseo_labs/google/related_keywords','term_id'=>$term_id,'lang'=>$lang,'tag'=>'related:'.$term_id.':'.$lang];
+                    if (count($tasks) >= $max_batch){
+                        self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); $tasks=[]; $ctxs=[];
+                    }
+                }
+                if ($tasks){ self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); }
             }
-            if ($tasks){ self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); }
         }
 
         // Build deduped pool for intent & volume
@@ -943,15 +1263,43 @@ final class DS_Keywords {
                 }
             }
 
-            // ---- VOLUME (ASYNC) ----
+            // ---- VOLUME (ASYNC or LIVE) ----
             $per_task = max(1, (int)($limits['volume_keywords_per_task'] ?? 1000));
             $chunks = array_chunk($pool, $per_task);
-            $tasks=[]; $ctxs=[];
-            foreach ($chunks as $ch){
-                $tasks[] = [ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ];
-                $ctxs[]  = ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang];
+            $mode = self::get_mode('volume_mode');
+            if ($mode === 'live'){
+                $saved_total = 0; $posted = 0; $errors = 0;
+                foreach ($chunks as $ch){
+                    $payload = [[ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ]];
+                    self::log_write('info','volume live request', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]);
+                    list($json,$code,$err) = self::dfs_post('keywords_data/google_ads/search_volume/live', $payload, $auth);
+                    if ($err || $code < 200 || $code >= 300){
+                        $errors++; self::log_write('warn','volume live failed', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang]);
+                        continue;
+                    }
+                    $items = [];
+                    if (isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items'])) {
+                        $items = $json['tasks'][0]['result'][0]['items'];
+                    } elseif (isset($json['tasks'][0]['result']) && is_array($json['tasks'][0]['result'])) {
+                        $res = $json['tasks'][0]['result'];
+                        if (!empty($res) && isset($res[0]) && is_array($res[0]) && array_key_exists('keyword', $res[0])) {
+                            $items = $res;
+                        }
+                    }
+                    self::log_write('info','volume live nodes', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['nodes'=>is_array($items)?count($items):0]]);
+                    $saved = self::save_volume_items($items, $term_id, $lang);
+                    $saved_total += $saved; $posted++;
+                    self::log_write('info','volume live saved', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]);
+                }
+                self::log_write('info','volume live summary', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
+            } else {
+                $tasks=[]; $ctxs=[];
+                foreach ($chunks as $ch){
+                    $tasks[] = [ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ];
+                    $ctxs[]  = ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang];
+                }
+                if ($tasks){ self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth); }
             }
-            if ($tasks){ self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth); }
         }
 
         // ---- PAA (SERP Organic Advanced async) ----
@@ -994,27 +1342,26 @@ final class DS_Keywords {
         $task_id = (string)($result['id'] ?? '');
         $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$tq} WHERE endpoint=%s AND task_id=%s", 'dataforseo_labs/google/related_keywords', $task_id), ARRAY_A);
         $term_id = $row ? (int)$row['term_id'] : 0; $lang = $row ? (string)$row['lang'] : '';
-        $items = isset($result['items']) && is_array($result['items']) ? $result['items'] : [];
-        $ins=0;
-        foreach ($items as $it){
-            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
-            if ($kw==='') continue;
-            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
-            $comp   = isset($it['competition']) ? (float)$it['competition'] : null;
-            $cpc    = isset($it['cpc']) ? (float)$it['cpc'] : null;
-            $wpdb->query($wpdb->prepare(
-                    "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, competition, cpc, created_at, updated_at)
-                 VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s)
-                 ON DUPLICATE KEY UPDATE source='related', volume=COALESCE(VALUES(volume), volume), competition=COALESCE(VALUES(competition), competition), cpc=COALESCE(VALUES(cpc), cpc), updated_at=VALUES(updated_at)",
-                    $term_id, $lang, $kw, 'related',
-                    is_null($volume) ? null : $volume,
-                    is_null($comp) ? null : $comp,
-                    is_null($cpc) ? null : $cpc,
-                    $now, $now
-            ));
-            $ins++;
+
+        // Labs related: result node typically has items[], each with keyword_data.keyword and keyword_data.keyword_info
+        $raw_items = (isset($result['items']) && is_array($result['items'])) ? $result['items'] : [];
+        $norm = [];
+        foreach ($raw_items as $it){
+            if (isset($it['keyword_data']) && is_array($it['keyword_data'])){
+                $kd = $it['keyword_data'];
+                $kw = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                if ($kw==='') continue;
+                $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                $norm[] = array_merge(['keyword'=>$kw], $info);
+            } elseif (isset($it['keyword'])) {
+                // Fallback flat shape
+                $norm[] = $it;
+            }
         }
-        self::log_write('info','related result saved', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['items'=>$ins]]);
+        self::log_write('info','related nodes', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['nodes'=>count($raw_items),'normalized'=>count($norm)]]);
+
+        $saved = self::save_related_items($norm, $term_id, $lang);
+        self::log_write('info','related result saved', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['items'=>$saved]]);
         if ($row){ $wpdb->update($tq, ['status'=>'completed','result_json'=>substr(wp_json_encode($result),0,20000),'updated_at'=>$now], ['id'=>(int)$row['id']]); }
     }
 
@@ -1027,9 +1374,19 @@ final class DS_Keywords {
             $intent = '';
             $probs  = null;
             if (isset($it['search_intent_info'])){
+                // Older/alternative shape
                 $info = $it['search_intent_info'];
                 $intent = (string)($info['main_intent'] ?? ($info['main'] ?? ''));
                 $probs = wp_json_encode($info);
+            } elseif (isset($it['keyword_intent'])){
+                // Labs current shape
+                $main = $it['keyword_intent'];
+                $secondary = isset($it['secondary_keyword_intents']) ? $it['secondary_keyword_intents'] : null;
+                $intent = (string)($main['label'] ?? '');
+                $probs = wp_json_encode([
+                    'keyword_intent' => $main,
+                    'secondary_keyword_intents' => $secondary
+                ]);
             }
             $wpdb->query($wpdb->prepare(
                     "INSERT INTO {$tk} (term_id, lang, keyword, source, intent_main, intent_probs, created_at, updated_at)
@@ -1048,20 +1405,17 @@ final class DS_Keywords {
         $task_id = (string)($result['id'] ?? '');
         $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$tq} WHERE endpoint=%s AND task_id=%s", 'keywords_data/google_ads/search_volume', $task_id), ARRAY_A);
         $term_id = $row ? (int)$row['term_id'] : 0; $lang = $row ? (string)$row['lang'] : '';
-        $items = isset($result['items']) && is_array($result['items']) ? $result['items'] : [];
-        $ins=0;
-        foreach ($items as $it){
-            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
-            if ($kw==='') continue;
-            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
-            $wpdb->query($wpdb->prepare(
-                    "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, created_at, updated_at)
-                 VALUES (%d, %s, %s, %s, %s, %s, %s)
-                 ON DUPLICATE KEY UPDATE volume=COALESCE(VALUES(volume), volume), updated_at=VALUES(updated_at)",
-                    $term_id, $lang, $kw, 'volume', is_null($volume)?null:$volume, $now, $now
-            ));
-            $ins++;
+
+        // Support both shapes: container with items[] or flat item node
+        $items = [];
+        if (isset($result['items']) && is_array($result['items'])) {
+            $items = $result['items'];
+        } elseif (isset($result['keyword'])) {
+            $items = [$result];
         }
+        self::log_write('info','volume nodes', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['nodes'=>is_array($items)?count($items):0]]);
+
+        $ins = self::save_volume_items($items, $term_id, $lang);
         self::log_write('info','volume result saved', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['items'=>$ins]]);
         if ($row){ $wpdb->update($tq, ['status'=>'completed','result_json'=>substr(wp_json_encode($result),0,20000),'updated_at'=>$now], ['id'=>(int)$row['id']]); }
     }
@@ -1073,6 +1427,7 @@ final class DS_Keywords {
         $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$tq} WHERE endpoint=%s AND task_id=%s", 'serp/google/organic', $task_id), ARRAY_A);
         $term_id = $row ? (int)$row['term_id'] : 0; $lang = $row ? (string)$row['lang'] : '';
         $items = isset($result['items']) && is_array($result['items']) ? $result['items'] : [];
+        self::log_write('info','paa nodes', ['endpoint'=>'serp/google/organic','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'task_id'=>$task_id,'response'=>['nodes'=>is_array($items)?count($items):0]]);
         $ins=0;
         foreach ($items as $root){
             if ((string)($root['type'] ?? '') !== 'people_also_ask') continue;
@@ -1151,5 +1506,121 @@ final class DS_Keywords {
             if (wp_next_scheduled(self::CRON_REFRESH)) { wp_clear_scheduled_hook(self::CRON_REFRESH); }
             if (wp_next_scheduled(self::CRON_POLL))    { wp_clear_scheduled_hook(self::CRON_POLL); }
         }
+    }
+
+    // ----- Mode & live saving helpers -----
+    private static function get_mode($key){
+        $limits = self::get_limits();
+        $mode = isset($limits[$key]) ? strtolower((string)$limits[$key]) : 'async';
+        return ($mode === 'live') ? 'live' : 'async';
+    }
+
+    private static function save_ideas_items($items, $term_id, $lang){
+        if (!is_array($items) || empty($items)) return 0;
+        global $wpdb; $tk = self::table_keywords(); $now = current_time('mysql');
+        $ins = 0;
+        foreach ($items as $it){
+            if (!is_array($it)) continue;
+            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
+            if ($kw==='') continue;
+            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
+            $comp   = isset($it['competition']) ? ( (string)$it['competition'] === 'LOW' || (string)$it['competition'] === 'MEDIUM' || (string)$it['competition'] === 'HIGH' ? null : (float)$it['competition'] ) : ( isset($it['keyword_info']['competition']) ? (float)$it['keyword_info']['competition'] : null );
+            $cpc    = isset($it['cpc']) ? (float)$it['cpc'] : ( isset($it['keyword_info']['cpc']) ? (float)$it['keyword_info']['cpc'] : null );
+            $bid_l  = isset($it['low_top_of_page_bid']) ? (float)$it['low_top_of_page_bid'] : ( isset($it['keyword_info']['low_top_of_page_bid']) ? (float)$it['keyword_info']['low_top_of_page_bid'] : null );
+            $bid_h  = isset($it['high_top_of_page_bid']) ? (float)$it['high_top_of_page_bid'] : ( isset($it['keyword_info']['high_top_of_page_bid']) ? (float)$it['keyword_info']['high_top_of_page_bid'] : null );
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, competition, cpc, top_of_page_bid_low, top_of_page_bid_high, created_at, updated_at)
+                 VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ON DUPLICATE KEY UPDATE volume=COALESCE(VALUES(volume), volume), competition=COALESCE(VALUES(competition), competition), cpc=COALESCE(VALUES(cpc), cpc), top_of_page_bid_low=COALESCE(VALUES(top_of_page_bid_low), top_of_page_bid_low), top_of_page_bid_high=COALESCE(VALUES(top_of_page_bid_high), top_of_page_bid_high), updated_at=VALUES(updated_at)",
+                $term_id, $lang, $kw, 'ideas',
+                is_null($volume)?null:$volume,
+                is_null($comp)?null:$comp,
+                is_null($cpc)?null:$cpc,
+                is_null($bid_l)?null:$bid_l,
+                is_null($bid_h)?null:$bid_h,
+                $now, $now
+            ));
+            $ins++;
+        }
+        return $ins;
+    }
+
+    private static function save_volume_items($items, $term_id, $lang){
+        if (!is_array($items) || empty($items)) return 0;
+        global $wpdb; $tk = self::table_keywords(); $now = current_time('mysql');
+        $ins = 0;
+        foreach ($items as $it){
+            if (!is_array($it)) continue;
+            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
+            if ($kw==='') continue;
+            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, created_at, updated_at)
+                 VALUES (%d, %s, %s, %s, %s, %s, %s)
+                 ON DUPLICATE KEY UPDATE volume=COALESCE(VALUES(volume), volume), updated_at=VALUES(updated_at)",
+                $term_id, $lang, $kw, 'volume', is_null($volume)?null:$volume, $now, $now
+            ));
+            $ins++;
+        }
+        return $ins;
+    }
+
+    private static function save_related_items($items, $term_id, $lang){
+        if (!is_array($items) || empty($items)) return 0;
+        global $wpdb; $tk = self::table_keywords(); $now = current_time('mysql');
+        $ins = 0;
+        foreach ($items as $it){
+            if (!is_array($it)) continue;
+            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
+            if ($kw==='') continue;
+            $volume = isset($it['search_volume']) ? (int)$it['search_volume'] : ( isset($it['keyword_info']['search_volume']) ? (int)$it['keyword_info']['search_volume'] : null );
+            $comp   = isset($it['competition']) ? (float)$it['competition'] : null;
+            $cpc    = isset($it['cpc']) ? (float)$it['cpc'] : null;
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$tk} (term_id, lang, keyword, source, volume, competition, cpc, created_at, updated_at)
+                 VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ON DUPLICATE KEY UPDATE source='related', volume=COALESCE(VALUES(volume), volume), competition=COALESCE(VALUES(competition), competition), cpc=COALESCE(VALUES(cpc), cpc), updated_at=VALUES(updated_at)",
+                $term_id, $lang, $kw, 'related',
+                is_null($volume)?null:$volume,
+                is_null($comp)?null:$comp,
+                is_null($cpc)?null:$cpc,
+                $now, $now
+            ));
+            $ins++;
+        }
+        return $ins;
+    }
+
+    private static function save_forecast_items($items, $term_id, $lang){
+        if (!is_array($items) || empty($items)) return 0;
+        global $wpdb; $tf = self::table_ads_forecast(); $now = current_time('mysql');
+        $ins = 0;
+        foreach ($items as $it){
+            if (!is_array($it)) continue;
+            $kw = isset($it['keyword']) ? (string)$it['keyword'] : '';
+            if ($kw==='') continue;
+            $m = isset($it['metrics']) && is_array($it['metrics']) ? $it['metrics'] : $it;
+            $clicks = isset($m['clicks']) ? (float)$m['clicks'] : null;
+            $impr   = isset($m['impressions']) ? (float)$m['impressions'] : null;
+            $cost   = isset($m['cost']) ? (float)$m['cost'] : null;
+            $cpc    = isset($m['cpc']) ? (float)$m['cpc'] : ( ($clicks && $cost) ? (float)$cost / max(0.001,$clicks) : null );
+            $ctr    = isset($m['ctr']) ? (float)$m['ctr'] : null;
+            $pos    = isset($m['position']) ? (float)$m['position'] : null;
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$tf} (term_id, lang, keyword, clicks, impressions, cost, cpc, ctr, position, created_at, updated_at)
+                 VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ON DUPLICATE KEY UPDATE clicks=VALUES(clicks), impressions=VALUES(impressions), cost=VALUES(cost), cpc=VALUES(cpc), ctr=VALUES(ctr), position=VALUES(position), updated_at=VALUES(updated_at)",
+                $term_id, $lang, $kw,
+                is_null($clicks)?null:$clicks,
+                is_null($impr)?null:$impr,
+                is_null($cost)?null:$cost,
+                is_null($cpc)?null:$cpc,
+                is_null($ctr)?null:$ctr,
+                is_null($pos)?null:$pos,
+                $now, $now
+            ));
+            $ins++;
+        }
+        return $ins;
     }
 }
