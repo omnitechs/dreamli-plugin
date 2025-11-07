@@ -526,6 +526,7 @@ final class DS_AI_Product_SEO {
         if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); self::mark_failed($run_id,'no_category'); return; }
         if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   self::mark_failed($run_id,'no_images'); return; }
         self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws=' . (!empty($ctx['keywords']) ? 1 : 0));
+        self::log($run_id,'Keyword details/FAQ: kws_det='. (isset($ctx['keywords_detailed'])?count($ctx['keywords_detailed']):0) .', faq='.(isset($ctx['faq'])?count($ctx['faq']):0));
         self::log($run_id,'Category URL: ' . (!empty($ctx['category_url']) ? $ctx['category_url'] : '[none]'));
 
         // Messages
@@ -535,10 +536,12 @@ final class DS_AI_Product_SEO {
 
         $user_inputs = [
             "PRODUCT INFORMATION" => [
-                "product_name"     => $post->post_title,
-                "product_category" => $ctx['primary_cat_name'],
-                "keywords"         => $ctx['keywords'],
-                "note"             => "Images attached below. Analysis allowed."
+                "product_name"       => $post->post_title,
+                "product_category"   => $ctx['primary_cat_name'],
+                "keywords"           => $ctx['keywords'],
+                "keywords_detailed"  => $ctx['keywords_detailed'],
+                "faq"                => $ctx['faq'],
+                "note"               => "Images attached below. Analysis allowed."
             ],
             "INTERNAL LINKS (Optional)" => [
                 "category_url" => $ctx['category_url'] ?? ''
@@ -592,6 +595,7 @@ final class DS_AI_Product_SEO {
                . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
                . 'If an external link is provided, you may include it naturally up to 1–2 times. '
                . 'Keep links HTML with <a href="...">...</a>.\n\n'
+               . 'IMPORTANT: You are given keywords_detailed with intent and search volume. Prioritize COMMERCIAL and TRANSACTIONAL intents with the highest volumes, and write for buying/searcher intent. Use them naturally (no keyword stuffing) to inform titles, meta, bullets, and body. Consider the provided FAQ (questions/answers) and align the content to address those shopper concerns.\n\n'
                . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"...","faq":[{"question":"...","answer":"..."}]}\n\n'
                . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
@@ -879,6 +883,7 @@ final class DS_AI_Product_SEO {
     }
 
     private static function build_context($post_id){
+        global $wpdb;
         $cat_terms = wp_get_post_terms($post_id, 'product_cat');
         $has_cat   = !is_wp_error($cat_terms) && !empty($cat_terms);
         $cat_names = [];
@@ -897,6 +902,10 @@ final class DS_AI_Product_SEO {
             }
         }
 
+        // Collect category IDs
+        $term_ids = [];
+        if ($has_cat){ foreach ($cat_terms as $t){ $term_ids[] = (int)$t->term_id; } $term_ids = array_values(array_unique($term_ids)); }
+
         // Category URL (optional)
         $category_url = '';
         if ($has_cat) {
@@ -913,15 +922,15 @@ final class DS_AI_Product_SEO {
         // External link (optional)
         $external_link = get_post_meta($post_id, '_ds_ai_external_url', true);
 
-        // Keywords: category keywords + additional keywords (product-level), merged & deduped
+        // Legacy flat keywords from category meta + product-level additions (backward compatibility)
         $cat_kws = '';
         if ($has_cat) {
             $cat_kws = (string) get_term_meta($cat_terms[0]->term_id, 'ds_cat_keywords', true);
         }
         $additional_kws = (string) get_post_meta($post_id, '_ds_ai_dutch_kws', true);
-        $all = array_filter(array_map('trim', explode(',', $cat_kws . (strlen($cat_kws)&&strlen($additional_kws) ? ',' : '') . $additional_kws)));
-        $all = array_values(array_unique($all));
-        $keywords = implode(', ', $all);
+        $all_legacy = array_filter(array_map('trim', explode(',', $cat_kws . (strlen($cat_kws)&&strlen($additional_kws) ? ',' : '') . $additional_kws)));
+        $all_legacy = array_values(array_unique($all_legacy));
+        $legacy_keywords_csv = implode(', ', $all_legacy);
 
         // Story
         $story = get_post_meta($post_id, '_ds_ai_story', true);
@@ -938,11 +947,161 @@ final class DS_AI_Product_SEO {
         }
         $img_urls = array_values(array_unique($img_urls));
 
+        // ====== New: Prioritized keywords with intent and volume + FAQs ======
+        $kw_max      = 12;  // max keywords to send
+        $kw_min_vol  = 20;  // minimum search volume threshold
+        $faq_max     = 8;   // max FAQ items
+        $accept      = ['commercial','transactional','purchase','commercial investigation','shopping','buy'];
+        $accept_lc   = array_map('strtolower', $accept);
+        $language    = '';
+        if (function_exists('pll_get_post_language')) {
+            $language = (string) pll_get_post_language($post_id);
+        }
+        if ($language===''){ $language = get_locale(); $language = is_string($language) ? substr($language,0,12) : ''; }
+
+        $keywords_detailed = [];
+        $keywords_csv      = $legacy_keywords_csv;
+        $faq_pairs         = [];
+
+        // Load from DS_Keywords tables if available
+        if ($has_cat && !empty($term_ids) && class_exists('DS_Keywords')){
+            // Gather keywords with intent/volume
+            $tk = DS_Keywords::table_keywords();
+            // Build IN clause safely
+            $placeholders = implode(',', array_fill(0, count($term_ids), '%d'));
+            $sql = $wpdb->prepare("SELECT term_id, keyword, intent_main, volume, cpc FROM {$tk} WHERE lang=%s AND term_id IN ({$placeholders}) LIMIT 500", array_merge([$language], $term_ids));
+            $rows = $wpdb->get_results($sql, ARRAY_A);
+
+            if (is_array($rows) && !empty($rows)){
+                // Normalize and group
+                $norm = [];
+                foreach ($rows as $r){
+                    $kw = trim((string)$r['keyword']); if ($kw==='') continue;
+                    $lc = strtolower($kw);
+                    $intent = strtolower((string)($r['intent_main'] ?? ''));
+                    $volume = is_null($r['volume']) ? null : (int)$r['volume'];
+                    $cpc    = isset($r['cpc']) ? (float)$r['cpc'] : null;
+                    $tid    = (int)$r['term_id'];
+                    if (!isset($norm[$lc])) $norm[$lc] = [];
+                    $norm[$lc][] = ['keyword'=>$kw,'intent'=>$intent,'volume'=>$volume,'cpc'=>$cpc,'term_id'=>$tid];
+                }
+
+                // Reduce duplicates by taking the best metrics per keyword
+                $cand = [];
+                foreach ($norm as $lc=>$arr){
+                    usort($arr, function($a,$b){
+                        $va = is_null($a['volume'])? -1 : (int)$a['volume'];
+                        $vb = is_null($b['volume'])? -1 : (int)$b['volume'];
+                        if ($va!==$vb) return $vb <=> $va;
+                        $ca = is_null($a['cpc'])? -1.0 : (float)$a['cpc'];
+                        $cb = is_null($b['cpc'])? -1.0 : (float)$b['cpc'];
+                        if ($ca!==$cb) return ($cb <=> $ca);
+                        return strcmp($a['keyword'],$b['keyword']);
+                    });
+                    $cand[] = $arr[0];
+                }
+
+                // Primary filter: preferred intents only with min volume
+                $preferred = array_values(array_filter($cand, function($it) use ($accept_lc, $kw_min_vol){
+                    $ok_intent = in_array((string)$it['intent'], $accept_lc, true);
+                    $ok_vol = is_null($it['volume']) ? false : ((int)$it['volume'] >= $kw_min_vol);
+                    return $ok_intent && $ok_vol;
+                }));
+
+                // Fallbacks if needed
+                $pool = $preferred;
+                if (empty($pool)){
+                    // Allow preferred intents regardless of min volume
+                    $pool = array_values(array_filter($cand, function($it) use ($accept_lc){ return in_array((string)$it['intent'], $accept_lc, true); }));
+                }
+                if (empty($pool)){
+                    // Allow any intent with min volume
+                    $pool = array_values(array_filter($cand, function($it) use ($kw_min_vol){ return !is_null($it['volume']) && (int)$it['volume'] >= $kw_min_vol; }));
+                }
+                if (empty($pool)){
+                    // Any remaining
+                    $pool = $cand;
+                }
+
+                // Sort final pool
+                usort($pool, function($a,$b){
+                    $va = is_null($a['volume'])? -1 : (int)$a['volume'];
+                    $vb = is_null($b['volume'])? -1 : (int)$b['volume'];
+                    if ($va!==$vb) return $vb <=> $va;
+                    $ca = is_null($a['cpc'])? -1.0 : (float)$a['cpc'];
+                    $cb = is_null($b['cpc'])? -1.0 : (float)$b['cpc'];
+                    if ($ca!==$cb) return ($cb <=> $ca);
+                    return strcmp($a['keyword'],$b['keyword']);
+                });
+
+                $keywords_detailed = array_slice($pool, 0, $kw_max);
+                if (!empty($keywords_detailed)){
+                    $keywords_csv = implode(', ', array_map(function($it){ return $it['keyword']; }, $keywords_detailed));
+                }
+            }
+
+            // Load FAQs (PAA)
+            $tf = DS_Keywords::table_faq();
+            $faq_rows = [];
+            if (!empty($term_ids)){
+                $placeholders = implode(',', array_fill(0, count($term_ids), '%d'));
+                $sqlf = $wpdb->prepare("SELECT question, answer FROM {$tf} WHERE lang=%s AND term_id IN ({$placeholders}) ORDER BY updated_at DESC LIMIT 200", array_merge([$language], $term_ids));
+                $faq_rows = $wpdb->get_results($sqlf, ARRAY_A);
+            }
+            $faq_map = [];
+            if (is_array($faq_rows)){
+                foreach ($faq_rows as $r){
+                    $q = trim((string)($r['question'] ?? '')); if ($q==='') continue;
+                    $a = (string)($r['answer'] ?? '');
+                    $k = strtolower($q);
+                    if (!isset($faq_map[$k])) $faq_map[$k] = ['question'=>$q,'answer'=>$a];
+                    else {
+                        // Prefer row with non-empty answer
+                        if ($a!=='' && $faq_map[$k]['answer']==='') $faq_map[$k] = ['question'=>$q,'answer'=>$a];
+                    }
+                }
+            }
+            // Merge ACF product_faq if available
+            if (function_exists('get_field')){
+                $acf_faq = get_field('product_faq', $post_id);
+                if (is_array($acf_faq)){
+                    foreach ($acf_faq as $row){
+                        $q = trim((string)($row['question'] ?? '')); if ($q==='') continue;
+                        $a = (string)($row['answer'] ?? '');
+                        $k = strtolower($q);
+                        if (!isset($faq_map[$k])) $faq_map[$k] = ['question'=>$q,'answer'=>$a];
+                        else if ($faq_map[$k]['answer']==='' && $a!=='') $faq_map[$k] = ['question'=>$q,'answer'=>$a];
+                    }
+                }
+            }
+            $faq_pairs = array_values($faq_map);
+            // Order: answered first, then shorter question
+            usort($faq_pairs, function($a,$b){
+                $aa = trim((string)$a['answer'])!=='' ? 1 : 0;
+                $bb = trim((string)$b['answer'])!=='' ? 1 : 0;
+                if ($aa!==$bb) return $bb <=> $aa;
+                return strlen($a['question']) <=> strlen($b['question']);
+            });
+            // Limit and truncate long answers
+            $faq_pairs = array_slice($faq_pairs, 0, $faq_max);
+            foreach ($faq_pairs as &$qa){ if (is_string($qa['answer']) && strlen($qa['answer'])>2000) $qa['answer']=substr($qa['answer'],0,2000); }
+            unset($qa);
+        }
+
+        // Cap arrays to context budget (split budget roughly in half)
+        $budget = (int) get_option(self::OPT_CONTEXT_MAX_BYTES, 24000);
+        if ($budget < 1000) { $budget = 24000; }
+        if (!empty($keywords_detailed)) { $keywords_detailed = self::cap_array_bytes($keywords_detailed, (int)($budget/2)); }
+        if (!empty($faq_pairs))        { $faq_pairs        = self::cap_array_bytes($faq_pairs,        (int)($budget/2)); }
+
+        // Final context return
         return [
             'has_cat'          => $has_cat,
             'cat_names'        => $cat_names,
             'primary_cat_name' => $primary,
-            'keywords'         => $keywords,
+            'keywords'         => $keywords_csv,
+            'keywords_detailed'=> $keywords_detailed,
+            'faq'              => $faq_pairs,
             'category_url'     => $category_url,
             'external_link'    => $external_link,
             'story'            => $story,
@@ -1298,6 +1457,7 @@ final class DS_AI_Product_SEO {
         if (!$ctx['has_cat'])   { self::log($run_id,'ERROR: No category on product'); return; }
         if (!$ctx['has_images']){ self::log($run_id,'ERROR: No images on product');   return; }
         self::log($run_id,'Context OK: images='.count($ctx['img_urls']).', cat_chains='.count($ctx['cat_names']).', kws=' . (!empty($ctx['keywords']) ? 1 : 0));
+        self::log($run_id,'Keyword details/FAQ: kws_det='. (isset($ctx['keywords_detailed'])?count($ctx['keywords_detailed']):0) .', faq='.(isset($ctx['faq'])?count($ctx['faq']):0));
         self::log($run_id,'Category URL: ' . (!empty($ctx['category_url']) ? $ctx['category_url'] : '[none]'));
 
         $system = (string) get_option(self::OPT_SYSTEM_PROMPT, "You are an SEO copywriter...");
@@ -1305,10 +1465,12 @@ final class DS_AI_Product_SEO {
 
         $user_inputs = [
             "PRODUCT INFORMATION" => [
-                "product_name"     => $post->post_title,
-                "product_category" => $ctx['primary_cat_name'],
-                "keywords"         => $ctx['keywords'],
-                "note"             => "Images attached below. Analysis allowed."
+                "product_name"       => $post->post_title,
+                "product_category"   => $ctx['primary_cat_name'],
+                "keywords"           => $ctx['keywords'],
+                "keywords_detailed"  => $ctx['keywords_detailed'],
+                "faq"                => $ctx['faq'],
+                "note"               => "Images attached below. Analysis allowed."
             ],
             "INTERNAL LINKS (Optional)" => [
                 "category_url" => $ctx['category_url'] ?? ''
@@ -1347,6 +1509,7 @@ final class DS_AI_Product_SEO {
                . 'If no category URL is provided in inputs or via tools context, do not insert internal links. '
                . 'If an external link is provided, you may include it naturally up to 1–2 times. '
                . 'Keep links HTML with <a href="...">...</a>.\n\n'
+               . 'IMPORTANT: You are given keywords_detailed with intent and search volume. Prioritize COMMERCIAL and TRANSACTIONAL intents with the highest volumes, and write for buying/searcher intent. Use them naturally (no keyword stuffing) to inform titles, meta, bullets, and body. Consider the provided FAQ (questions/answers) and align the content to address those shopper concerns.\n\n'
                . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"...","faq":[{"question":"...","answer":"..."}]}\n\n'
                . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
