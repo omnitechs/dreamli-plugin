@@ -666,17 +666,42 @@ final class DS_Admin_Menus {
             foreach ($posts as $p) {
                 $pid = (int)$p->ID;
                 $title = get_the_title($pid) ?: ('#'.$pid);
-                $holder = class_exists('DS_Entitlements') ? (int)DS_Entitlements::current_holder($pid) : (int)$p->post_author;
-                $holder_name = $holder ? ( ($u=get_userdata($holder)) ? $u->display_name : ('#'.$holder) ) : '-';
                 $override = (int) get_post_meta($pid, '_ds_entitlement_override_user', true);
-                $in_pool = (int) get_post_meta($pid, '_ds_pool', true) === 1;
+                $in_pool = class_exists('DS_Entitlements') ? DS_Entitlements::is_in_pool($pid) : ((int) get_post_meta($pid, '_ds_pool', true) === 1);
+                $prev_owner = (int) get_post_meta($pid, '_ds_pool_prev_owner', true);
+                if ($in_pool) {
+                    $holder_html = '<span style="color:#d63638;">Pool</span>';
+                    if ($prev_owner > 0) {
+                        $u_prev = get_userdata($prev_owner);
+                        if ($u_prev) {
+                            $link = get_edit_user_link($prev_owner);
+                            $name = esc_html($u_prev->display_name);
+                            $holder_html .= ' <small>(prev: '.($link ? '<a href="'.esc_url($link).'">'.$name.'</a>' : $name).')</small>';
+                        }
+                    }
+                } else {
+                    $holder = class_exists('DS_Entitlements') ? (int)DS_Entitlements::current_holder($pid) : (int)$p->post_author;
+                    if ($holder > 0) {
+                        $u = get_userdata($holder);
+                        if ($u) {
+                            $name = esc_html($u->display_name);
+                            $link = get_edit_user_link($holder);
+                            $holder_html = $link ? '<a href="'.esc_url($link).'">'.$name.'</a>' : $name;
+                        } else {
+                            $holder_html = '#'.intval($holder);
+                        }
+                    } else {
+                        $holder_html = '-';
+                    }
+                    if ($override) { $holder_html .= ' <span style="color:#d63638;">(override)</span>'; }
+                }
                 $row = $t ? $wpdb->get_row($wpdb->prepare("SELECT * FROM {$t} WHERE product_id=%d AND month=%s", $pid, $prev_month)) : null;
                 $lm = $row ? sprintf('v:%d / mean:%0.2f / fee:€%0.2f / %s', (int)$row->views, (float)$row->mean_views, (float)$row->amount_due, esc_html($row->status)) : '—';
 
                 echo '<tr>';
                 echo '<td>'.(int)$pid.'</td>';
                 echo '<td><a href="'.esc_url(get_edit_post_link($pid)).'">'.esc_html($title).'</a></td>';
-                echo '<td>'.esc_html($holder_name).($override?' <span style="color:#d63638;">(override)</span>':'').'</td>';
+                echo '<td>'.$holder_html.'</td>';
                 echo '<td>'.($in_pool?'<span style="color:#d63638;">Yes</span>':'No').'</td>';
                 echo '<td>'.esc_html($lm).'</td>';
                 echo '<td>';
@@ -690,15 +715,22 @@ final class DS_Admin_Menus {
                 echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
                 echo '<input type="hidden" name="action" value="ds_entitlement_override_set">';
                 echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-                echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
-                echo '<input type="number" name="user_id" min="1" placeholder="User ID" style="width:100px;"> ';
+                echo wp_nonce_field('ds_ent_override_'.$pid, '_ds_ent_nonce', true, false);
+                $dd = wp_dropdown_users([
+                    'name' => 'user_id',
+                    'selected' => 0,
+                    'role__in' => ['ds_vendor_open','ds_vendor_curated','ds_vendor_admin','administrator'],
+                    'show_option_none' => 'Select user',
+                    'echo' => 0
+                ]);
+                echo $dd.' ';
                 echo '<button class="button">Set</button>';
                 echo '</form>';
                 // Clear override
                 echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
                 echo '<input type="hidden" name="action" value="ds_entitlement_override_clear">';
                 echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-                echo wp_nonce_field('ds_ent_override_'.$pid, '_wpnonce', true, false);
+                echo wp_nonce_field('ds_ent_override_'.$pid, '_ds_ent_nonce', true, false);
                 echo '<button class="button">Clear</button>';
                 echo '</form>';
                 // Pool send/remove
@@ -706,15 +738,23 @@ final class DS_Admin_Menus {
                     echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
                     echo '<input type="hidden" name="action" value="ds_pool_send">';
                     echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-                    echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
+                    echo wp_nonce_field('ds_pool_'.$pid, '_ds_ent_nonce', true, false);
                     echo '<button class="button">Send to Pool</button>';
                     echo '</form>';
                 } else {
                     echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:inline-block;margin-right:6px;">';
                     echo '<input type="hidden" name="action" value="ds_pool_remove">';
                     echo '<input type="hidden" name="product_id" value="'.(int)$pid.'">';
-                    echo wp_nonce_field('ds_pool_'.$pid, '_wpnonce', true, false);
-                    echo '<input type="number" name="user_id" min="1" placeholder="Restore User ID" style="width:120px;"> ';
+                    echo wp_nonce_field('ds_pool_'.$pid, '_ds_ent_nonce', true, false);
+                    $dd2 = wp_dropdown_users([
+                        'name' => 'user_id',
+                        'selected' => max(0, (int)$prev_owner),
+                        'role__in' => ['ds_vendor_open','ds_vendor_curated','ds_vendor_admin','administrator'],
+                        'show_option_none' => 'Restore to (optional)',
+                        'option_none_value' => 0,
+                        'echo' => 0
+                    ]);
+                    echo $dd2.' ';
                     echo '<button class="button">Remove from Pool</button>';
                     echo '</form>';
                 }
@@ -745,7 +785,17 @@ final class DS_Admin_Menus {
         echo '<option value="clear_override">Clear override</option>';
         echo '<option value="send_pool">Send to Pool</option>';
         echo '<option value="remove_pool">Remove from Pool</option>';
-        echo '</select> &nbsp; Target User ID (for set/remove): <input type="number" name="user_id" min="1" style="width:120px;"></p>';
+        echo '</select> &nbsp; ';
+        $bulk_dd = wp_dropdown_users([
+            'name' => 'user_id',
+            'selected' => 0,
+            'role__in' => ['vendor','vendor_admin','administrator'],
+            'show_option_none' => 'Target user (optional for set/remove)',
+            'option_none_value' => 0,
+            'echo' => 0
+        ]);
+        echo $bulk_dd;
+        echo '</p>';
         echo '<p>Product IDs (comma or space separated):<br><textarea name="product_ids" rows="3" style="width:100%;"></textarea></p>';
         echo '<p><button class="button button-primary">Run</button></p>';
         echo '</form>';

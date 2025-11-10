@@ -75,20 +75,34 @@ final class DS_Entitlements {
 		// 1) Admin override
 		$override = (int) get_post_meta($product_id, '_ds_entitlement_override_user', true);
 		if ($override > 0) { return self::$holder_cache[$product_id] = $override; }
-		// 2) Pool user
-		$in_pool = (int) get_post_meta($product_id, '_ds_pool', true) === 1;
-		if ($in_pool) {
-			$s = DS_Settings::get();
-			$pool_uid = (int)($s['pool_user_id'] ?? 0);
-			if ($pool_uid <= 0) {
-				$admins = get_users(['role'=>'administrator','number'=>1,'fields'=>['ID']]);
-				$pool_uid = $admins && isset($admins[0]) ? (int)$admins[0]->ID : 1;
-			}
+		// 2) Pool user (robust)
+		if (self::is_in_pool($product_id)) {
+			$pool_uid = self::pool_user_id();
 			return self::$holder_cache[$product_id] = $pool_uid;
 		}
 		// 3) Fallback author
 		$author = (int) get_post_field('post_author', $product_id);
 		return self::$holder_cache[$product_id] = $author;
+	}
+
+	/** Pool user id from settings or first admin fallback */
+	public static function pool_user_id() : int {
+		$s = DS_Settings::get();
+		$pool_uid = (int)($s['pool_user_id'] ?? 0);
+		if ($pool_uid <= 0) {
+			$admins = get_users(['role'=>'administrator','number'=>1,'fields'=>['ID']]);
+			$pool_uid = $admins && isset($admins[0]) ? (int)$admins[0]->ID : 1;
+		}
+		return $pool_uid;
+	}
+
+	/** True pool if flag is set and author equals pool user */
+	public static function is_in_pool(int $product_id) : bool {
+		if ($product_id <= 0) return false;
+		$flag = (int) get_post_meta($product_id, '_ds_pool', true) === 1;
+		if (!$flag) return false;
+		$author = (int) get_post_field('post_author', $product_id);
+		return $author === self::pool_user_id();
 	}
 
 	/** Check if the previous month entitlement for product is pending (optionally for a specific user) */
@@ -241,7 +255,8 @@ final class DS_Entitlements {
 			'nopaging' => true,
 			'no_found_rows' => true,
 		]);
-		return (int)$q->found_posts;
+		// When no_found_rows is true, found_posts may be 0; count posts instead
+		return is_array($q->posts) ? count($q->posts) : (int)$q->post_count;
 	}
 
 	public static function schedule_cron() {
@@ -403,7 +418,7 @@ final class DS_Entitlements {
 		if ($pid <= 0 || !wp_verify_nonce($nonce, 'ds_pool_claim_'.$pid)) wp_die('Invalid request');
 		if (!DS_Helpers::is_vendor($uid)) wp_die('No permission');
 		// Verify pool status
-		$in_pool = (int) get_post_meta($pid, '_ds_pool', true) === 1;
+		$in_pool = self::is_in_pool($pid);
 		if (!$in_pool) { self::redirect_back('claim', 'not_in_pool'); return; }
 
 		// Compute claim fee (if enabled)
@@ -511,7 +526,7 @@ final class DS_Entitlements {
 		$holder = (int)self::current_holder($pid);
 		$holder_name = $holder ? ( ($u=get_userdata($holder)) ? esc_html($u->display_name) : ('#'.$holder) ) : '-';
 		$override = (int) get_post_meta($pid, '_ds_entitlement_override_user', true);
-		$in_pool = (int) get_post_meta($pid, '_ds_pool', true) === 1;
+		$in_pool = self::is_in_pool($pid);
 		echo '<p><b>Current holder:</b> '.$holder_name.($override? ' <span style="color:#d63638;">(override)</span>':'').($in_pool?' <span style="color:#d63638;">(in pool)</span>':'').'</p>';
 		// Info: current dynamic claim fee
 		if (method_exists(__CLASS__, 'claim_fee_breakdown')) {
@@ -523,7 +538,15 @@ final class DS_Entitlements {
 		printf('<form method="post" action="%s">', esc_url(admin_url('admin-post.php?action=ds_entitlement_override_set')));
 		printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
 		echo wp_nonce_field('ds_ent_override_'.$pid, '_ds_ent_nonce', true, false);
-		echo '<p>User ID: <input type="number" name="user_id" min="1" step="1" style="width:100%"></p>';
+  $dd = wp_dropdown_users([
+			'name' => 'user_id',
+			'selected' => max(0, (int)$override),
+			'role__in' => ['ds_vendor_open','ds_vendor_curated','ds_vendor_admin','administrator'],
+			'show_option_none' => 'Select user',
+			'option_none_value' => 0,
+			'echo' => 0
+		]);
+		echo '<p>User: '.$dd.'</p>';
 		echo '<p><button class="button button-primary" type="submit">Set override</button></p>';
 		echo '</form>';
 		// Clear override
@@ -540,10 +563,19 @@ final class DS_Entitlements {
 			echo '<p><button class="button" type="submit">Send to Pool</button></p>';
 			echo '</form>';
 		} else {
+			$prev_owner = (int) get_post_meta($pid, '_ds_pool_prev_owner', true);
 			printf('<form method="post" action="%s" style="margin-top:6px">', esc_url(admin_url('admin-post.php?action=ds_pool_remove')));
 			printf('<input type="hidden" name="product_id" value="%d">', (int)$pid);
 			echo wp_nonce_field('ds_pool_'.$pid, '_ds_ent_nonce', true, false);
-			echo '<p>Restore to User ID (optional): <input type="number" name="user_id" min="1" step="1" style="width:100%"></p>';
+			$dd_restore = wp_dropdown_users([
+				'name' => 'user_id',
+				'selected' => max(0, (int)$prev_owner),
+				'role__in' => ['vendor','vendor_admin','administrator'],
+				'show_option_none' => 'Restore to (optional)',
+				'option_none_value' => 0,
+				'echo' => 0
+			]);
+			echo '<p>'.$dd_restore.'</p>';
 			echo '<p><button class="button" type="submit">Remove from Pool</button></p>';
 			echo '</form>';
 		}
@@ -556,7 +588,7 @@ final class DS_Entitlements {
 		if ($col !== 'ds_entitlement') return;
 		$holder = (int)self::current_holder((int)$post_id);
 		$override = (int) get_post_meta($post_id, '_ds_entitlement_override_user', true);
-		$in_pool = (int) get_post_meta($post_id, '_ds_pool', true) === 1;
+		$in_pool = class_exists('DS_Entitlements') ? DS_Entitlements::is_in_pool((int)$post_id) : ((int) get_post_meta($post_id, '_ds_pool', true) === 1);
 		$name = $holder ? ( ($u=get_userdata($holder)) ? esc_html($u->display_name) : ('#'.$holder) ) : '-';
 		echo esc_html($name);
 		if ($override) echo ' <span class="dashicons dashicons-admin-network" title="override"></span>';
