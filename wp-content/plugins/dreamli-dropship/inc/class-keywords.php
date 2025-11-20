@@ -781,6 +781,15 @@ final class DS_Keywords {
                             'include_adult_keywords' => false,
                             'limit' => min(300, (int)$limits['max_ideas_per_cat'])
                         ]];
+                        // Try reuse from logs to avoid re-calling live endpoint
+                        $reuse_saved = self::reuse_ideas_from_logs($payload[0], $term_id_lang, $lang);
+                        if ($reuse_saved > 0){
+                            $saved_total += $reuse_saved; $posts++;
+                            self::log_write('info','ideas live reuse hit', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'reuse','term_id'=>$term_id_lang,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                            self::maybe_trigger_followups($term_id_lang, $lang);
+                            $tasksPosted++;
+                            continue;
+                        }
                         self::log_write('info','ideas live request', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'live','term_id'=>$term_id_lang,'lang'=>$lang,'request'=>$payload]);
                         list($json,$code,$err) = self::dfs_post('keywords_data/google_ads/keywords_for_keywords/live', $payload, $auth);
                         if ($err || $code < 200 || $code >= 300){
@@ -811,13 +820,21 @@ final class DS_Keywords {
                 } else {
                     foreach ($groups as $group){
                         if ($tasksPosted >= $maxTasksPerRun) break;
-                        $tasks[] = [
-                                'keywords' => array_values($group),
-                                'language_code' => $lang_code,
-                                'location_code' => $loc_code,
-                                'include_adult_keywords' => false,
-                                'limit' => min(300, (int)$limits['max_ideas_per_cat'])
+                        $payload_task = [
+                            'keywords' => array_values($group),
+                            'language_code' => $lang_code,
+                            'location_code' => $loc_code,
+                            'include_adult_keywords' => false,
+                            'limit' => min(300, (int)$limits['max_ideas_per_cat'])
                         ];
+                        // Try reuse from logs to avoid posting duplicate async tasks
+                        $reuse_saved = self::reuse_ideas_from_logs($payload_task, $term_id_lang, $lang);
+                        if ($reuse_saved > 0){
+                            self::log_write('info','ideas async reuse hit', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'reuse','term_id'=>$term_id_lang,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                            self::maybe_trigger_followups($term_id_lang, $lang);
+                            continue;
+                        }
+                        $tasks[] = $payload_task;
                         $ctxs[] = ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','term_id'=>$term_id_lang,'lang'=>$lang,'tag'=>'ideas:'.$term_id_lang.':'.$lang];
 
                         if (count($tasks) >= $max_per_batch_post){
@@ -947,6 +964,128 @@ final class DS_Keywords {
         $s = preg_replace('/\s+/', ' ', $s);
         return substr($s, 0, 2000);
     }
+
+    // ----- Live response reuse from logs (last 2 days) -----
+    private static function find_recent_live_response_from_logs($endpoint_live, array $signatures){
+        // Returns decoded JSON of the response if found, else null
+        global $wpdb; $t = self::table_logs();
+        $since = gmdate('Y-m-d H:i:s', time() - 2*DAY_IN_SECONDS);
+        // Get recent successful response entries for this endpoint
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, ts, response_json_snippet FROM {$t} WHERE endpoint=%s AND action='response' AND http_code BETWEEN 200 AND 299 AND response_json_snippet IS NOT NULL AND ts >= %s ORDER BY id DESC LIMIT 200",
+            $endpoint_live, $since
+        ), ARRAY_A);
+        if (!$rows) return null;
+        foreach ($rows as $resp){
+            $resp_id = (int)$resp['id']; $resp_ts = $resp['ts'];
+            // Look back up to 30 minutes for a matching request entry for the same endpoint
+            $reqs = $wpdb->get_results($wpdb->prepare(
+                "SELECT id, request_json_snippet FROM {$t} WHERE endpoint=%s AND action='request' AND id <= %d AND ts >= DATE_SUB(%s, INTERVAL 30 MINUTE) ORDER BY id DESC LIMIT 50",
+                $endpoint_live, $resp_id, $resp_ts
+            ), ARRAY_A);
+            if (!$reqs) continue;
+            foreach ($reqs as $req){
+                $ok = true; $snippet = (string)$req['request_json_snippet'];
+                foreach ($signatures as $sig){ if ($sig!=='' && strpos($snippet, $sig) === false){ $ok=false; break; } }
+                if ($ok){
+                    $json = json_decode((string)$resp['response_json_snippet'], true);
+                    if (is_array($json)) return $json;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static function reuse_ideas_from_logs($payload_task, $term_id, $lang){
+        $keywords = isset($payload_task['keywords']) && is_array($payload_task['keywords']) ? $payload_task['keywords'] : [];
+        $lang_code = isset($payload_task['language_code']) ? (string)$payload_task['language_code'] : '';
+        $loc_code  = isset($payload_task['location_code']) ? (string)$payload_task['location_code'] : '';
+        $sigs = array_slice(array_values(array_unique(array_filter(array_map('strval',$keywords)))), 0, 3);
+        if ($lang_code!=='') $sigs[] = '"language_code":"'.$lang_code.'"';
+        if ($loc_code!=='')  $sigs[] = '"location_code":'.$loc_code;
+        $json = self::find_recent_live_response_from_logs('keywords_data/google_ads/keywords_for_keywords/live', $sigs);
+        if (!$json) return 0;
+        $items = [];
+        if (isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items'])){
+            $items = $json['tasks'][0]['result'][0]['items'];
+        } elseif (isset($json['tasks'][0]['result']) && is_array($json['tasks'][0]['result'])){
+            $res = $json['tasks'][0]['result'];
+            if (!empty($res) && isset($res[0]) && is_array($res[0]) && array_key_exists('keyword',$res[0])){
+                $items = $res;
+            }
+        }
+        $saved = self::save_ideas_items($items, $term_id, $lang);
+        if ($saved>0){ self::log_write('info','reuse ideas from logs', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]); }
+        return $saved;
+    }
+
+    private static function reuse_related_from_logs($payload_task, $term_id, $lang){
+        $kw = isset($payload_task['keyword']) ? (string)$payload_task['keyword'] : '';
+        $lang_code = isset($payload_task['language_code']) ? (string)$payload_task['language_code'] : '';
+        $loc_code  = isset($payload_task['location_code']) ? (string)$payload_task['location_code'] : '';
+        $sigs = [];
+        if ($kw!=='') $sigs[] = '"keyword":"'.$kw.'"';
+        if ($lang_code!=='') $sigs[] = '"language_code":"'.$lang_code+'"';
+        if ($loc_code!=='')  $sigs[] = '"location_code":'.$loc_code;
+        $json = self::find_recent_live_response_from_logs('dataforseo_labs/google/related_keywords/live', $sigs);
+        if (!$json) return 0;
+        $items = isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items']) ? $json['tasks'][0]['result'][0]['items'] : [];
+        $norm = [];
+        foreach ($items as $it){
+            if (isset($it['keyword_data'])){
+                $kd = $it['keyword_data'];
+                $kw2 = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                $norm[] = array_merge(['keyword'=>$kw2], $info);
+            } elseif (isset($it['keyword'])) {
+                $norm[] = $it;
+            }
+        }
+        $saved = self::save_related_items($norm, $term_id, $lang);
+        if ($saved>0){ self::log_write('info','reuse related from logs', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]); }
+        return $saved;
+    }
+
+    private static function reuse_volume_from_logs($payload_task, $term_id, $lang){
+        $keywords = isset($payload_task['keywords']) && is_array($payload_task['keywords']) ? $payload_task['keywords'] : [];
+        $lang_code = isset($payload_task['language_code']) ? (string)$payload_task['language_code'] : '';
+        $loc_code  = isset($payload_task['location_code']) ? (string)$payload_task['location_code'] : '';
+        $sigs = array_slice(array_values(array_unique(array_filter(array_map('strval',$keywords)))), 0, 3);
+        if ($lang_code!=='') $sigs[] = '"language_code":"'.$lang_code.'"';
+        if ($loc_code!=='')  $sigs[] = '"location_code":'.$loc_code;
+        $json = self::find_recent_live_response_from_logs('keywords_data/google_ads/search_volume/live', $sigs);
+        if (!$json) return 0;
+        $items = [];
+        if (isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items'])){
+            $items = $json['tasks'][0]['result'][0]['items'];
+        } elseif (isset($json['tasks'][0]['result']) && is_array($json['tasks'][0]['result'])){
+            $res = $json['tasks'][0]['result'];
+            if (!empty($res) && isset($res[0]) && is_array($res[0]) && array_key_exists('keyword',$res[0])){
+                $items = $res;
+            }
+        }
+        $saved = self::save_volume_items($items, $term_id, $lang);
+        if ($saved>0){ self::log_write('info','reuse volume from logs', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]); }
+        return $saved;
+    }
+
+    private static function reuse_intent_from_logs($payload_task, $term_id, $lang){
+        $keywords = isset($payload_task['keywords']) && is_array($payload_task['keywords']) ? $payload_task['keywords'] : [];
+        $lang_code = isset($payload_task['language_code']) ? (string)$payload_task['language_code'] : '';
+        $loc_code  = isset($payload_task['location_code']) ? (string)$payload_task['location_code'] : '';
+        $sigs = array_slice(array_values(array_unique(array_filter(array_map('strval',$keywords)))), 0, 3);
+        if ($lang_code!=='') $sigs[] = '"language_code":"'.$lang_code.'"';
+        if ($loc_code!=='')  $sigs[] = '"location_code":'.$loc_code;
+        $json = self::find_recent_live_response_from_logs('dataforseo_labs/google/search_intent/live', $sigs);
+        if (!$json) return 0;
+        $items = isset($json['tasks'][0]['result'][0]['items']) ? $json['tasks'][0]['result'][0]['items'] : [];
+        if (!is_array($items)) $items = [];
+        self::handle_intent_items($items, $term_id, $lang);
+        $saved = is_array($items) ? count($items) : 0;
+        if ($saved>0){ self::log_write('info','reuse intent from logs', ['endpoint'=>'dataforseo_labs/google/search_intent/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]); }
+        return $saved;
+    }
+
     public static function purge_logs_maybe(){
         if (!self::log_enabled()) return;
         // Run at most every 12 hours
@@ -1298,6 +1437,13 @@ final class DS_Keywords {
                         'location_code' => $loc_code,
                         'limit' => 100
                     ]];
+                    // Try reuse from logs first
+                    $reuse_saved = self::reuse_related_from_logs($payload[0], $term_id, $lang);
+                    if ($reuse_saved > 0){
+                        $saved_total += $reuse_saved; $posted++;
+                        self::log_write('info','related live reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                        continue;
+                    }
                     self::log_write('info','related live request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]);
                     list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $payload, $auth);
                     if ($err || $code < 200 || $code >= 300){
@@ -1328,12 +1474,19 @@ final class DS_Keywords {
             } else {
                 $tasks=[]; $ctxs=[]; $max_batch=100;
                 foreach ($to_expand as $kw){
-                    $tasks[] = [
-                            'keyword' => $kw,
-                            'language_code' => $lang_code,
-                            'location_code' => $loc_code,
-                            'limit' => 100
+                    $payload_task = [
+                        'keyword' => $kw,
+                        'language_code' => $lang_code,
+                        'location_code' => $loc_code,
+                        'limit' => 100
                     ];
+                    // Try reuse from logs to avoid posting duplicate async related tasks
+                    $reuse_saved = self::reuse_related_from_logs($payload_task, $term_id, $lang);
+                    if ($reuse_saved > 0){
+                        self::log_write('info','related async reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                        continue;
+                    }
+                    $tasks[] = $payload_task;
                     $ctxs[] = ['endpoint'=>'dataforseo_labs/google/related_keywords','term_id'=>$term_id,'lang'=>$lang,'tag'=>'related:'.$term_id.':'.$lang];
                     if (count($tasks) >= $max_batch){
                         self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); $tasks=[]; $ctxs=[];
@@ -1355,6 +1508,12 @@ final class DS_Keywords {
             $intent_chunks = array_chunk($pool_intent, 1000);
             foreach ($intent_chunks as $ch){
                 $payload = [[ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ]];
+                // Try reuse from logs first
+                $reuse_saved = self::reuse_intent_from_logs($payload[0], $term_id, $lang);
+                if ($reuse_saved > 0){
+                    self::log_write('info','intent live reuse hit', ['endpoint'=>'dataforseo_labs/google/search_intent/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                    continue;
+                }
                 list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/search_intent/live', $payload, $auth);
                 if ($err || $code < 200 || $code >= 300){
                     self::log_write('warn','intent live failed', ['endpoint'=>'dataforseo_labs/google/search_intent/live','action'=>'live','http_code'=>$code,'error'=>$err,'request'=>$payload,'term_id'=>$term_id,'lang'=>$lang]);
@@ -1376,6 +1535,13 @@ final class DS_Keywords {
                 $saved_total = 0; $posted = 0; $errors = 0;
                 foreach ($chunks as $ch){
                     $payload = [[ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ]];
+                    // Try reuse from logs first
+                    $reuse_saved = self::reuse_volume_from_logs($payload[0], $term_id, $lang);
+                    if ($reuse_saved > 0){
+                        $saved_total += $reuse_saved; $posted++;
+                        self::log_write('info','volume live reuse hit', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                        continue;
+                    }
                     self::log_write('info','volume live request', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]);
                     list($json,$code,$err) = self::dfs_post('keywords_data/google_ads/search_volume/live', $payload, $auth);
                     if ($err || $code < 200 || $code >= 300){
@@ -1400,7 +1566,14 @@ final class DS_Keywords {
             } else {
                 $tasks=[]; $ctxs=[];
                 foreach ($chunks as $ch){
-                    $tasks[] = [ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ];
+                    $payload_task = [ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ];
+                    // Try reuse from logs to avoid posting duplicate async volume tasks
+                    $reuse_saved = self::reuse_volume_from_logs($payload_task, $term_id, $lang);
+                    if ($reuse_saved > 0){
+                        self::log_write('info','volume async reuse hit', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                        continue;
+                    }
+                    $tasks[] = $payload_task;
                     $ctxs[]  = ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang];
                 }
                 if ($tasks){ self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth); }
