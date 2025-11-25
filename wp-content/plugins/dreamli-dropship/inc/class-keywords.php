@@ -10,6 +10,8 @@ if (!defined('ABSPATH')) exit;
  * - PAA:    serp/google/organic (Advanced) async; only 1 seed per category by default
  */
 final class DS_Keywords {
+    // Correlation for a single refresh run
+    private static $run_id = null;
     // Schedules & hooks
     const CRON_REFRESH = 'ds_keywords_refresh_biweekly';
     const CRON_POLL    = 'ds_keywords_poll';
@@ -24,6 +26,7 @@ final class DS_Keywords {
     const OPT_LIMITS  = 'ds_dfs_limits_json';   // caps & toggles JSON
     const OPT_LOG_ENABLED   = 'ds_dfs_log_enabled'; // yes|no
     const OPT_LOG_RETENTION = 'ds_dfs_log_retention_days'; // int days
+    const OPT_LOG_SNIPPET   = 'ds_dfs_log_snippet'; // int chars per snippet
 
     // Tables
     public static function table_keywords(){ global $wpdb; return $wpdb->prefix.'ds_keywords'; }
@@ -222,6 +225,7 @@ final class DS_Keywords {
         // Logging
         register_setting('ds_keywords', self::OPT_LOG_ENABLED,  ['type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'yes']);
         register_setting('ds_keywords', self::OPT_LOG_RETENTION,['type'=>'integer','sanitize_callback'=>'absint','default'=>14]);
+        register_setting('ds_keywords', self::OPT_LOG_SNIPPET,  ['type'=>'integer','sanitize_callback'=>'absint','default'=>2000]);
     }
     public static function render_settings(){
         if (!current_user_can('manage_options')) return;
@@ -229,6 +233,7 @@ final class DS_Keywords {
         $limits  = get_option(self::OPT_LIMITS, '');
         $log_on  = get_option(self::OPT_LOG_ENABLED,'yes');
         $ret     = (int) get_option(self::OPT_LOG_RETENTION,14);
+        $snip    = (int) get_option(self::OPT_LOG_SNIPPET,2000);
         ?>
         <div class="wrap">
             <h1>Keyword Suggestions (DataForSEO)</h1>
@@ -366,6 +371,104 @@ final class DS_Keywords {
   "settle_hours": 48,
   "min_ready_ratio": 0.95,
   "poll_min_interval_minutes": 600
+}</code></pre>
+                                </div>
+                            </details>
+                            <details style="margin-top:6px">
+                                <summary><strong>Comprehensive JSON key reference</strong></summary>
+                                <div style="margin-top:8px; max-width:980px">
+                                    <p>All keys are optional; unspecified keys fall back to sensible defaults. Values shown in parentheses are types and ranges.</p>
+
+                                    <h4>Delivery modes (string: "live" | "async")</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>ideas_mode</code> — Google Ads keyword ideas; async recommended for bulk (≤ 20 seeds per task).</li>
+                                        <li><code>related_mode</code> — DataForSEO Labs related keywords; Labs has no async <code>task_post</code> so use <code>"live"</code>. Your code live‑batches many seeds per POST.</li>
+                                        <li><code>volume_mode</code> — Google Ads search volume; async recommended (≤ 1000 keywords per task).</li>
+                                        <li><code>forecast_mode</code> — Ads forecasts; async only.</li>
+                                        <li><code>paa_mode</code> — SERP People Also Ask; async only.</li>
+                                    </ul>
+
+                                    <h4>Global batching (aggregates across many categories/languages)</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>global_batching_enable</code> (bool) — enable cross‑term aggregation. Default: <code>true</code>.</li>
+                                        <li><code>tasks_per_http_post</code> (int 1..100) — max items per HTTP POST for batch endpoints. Default: 100.</li>
+                                        <li><code>global_flush_after_minutes</code> (int) — reserved; batches flush at request end and after each poll cycle.</li>
+                                    </ul>
+
+                                    <h4>Smart Fill (top‑up in the same run; no re‑posting Ideas)</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>smart_fill_enable</code> (bool) — run expand→fill cycles during the same refresh. Default: <code>true</code>.</li>
+                                        <li><code>target_keywords_per_cat</code> (int ≥ 1) — top‑up goal per category+language. Default: 300.</li>
+                                        <li><code>max_smart_cycles_per_run</code> (int ≥ 1) — how many expand→fill iterations per run. Default: 2.</li>
+                                    </ul>
+
+                                    <h4>Expansion & long‑tail</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>expansion_enable</code> (bool) — turn Labs related expansion on/off. Default: <code>true</code>.</li>
+                                        <li><code>expansion_candidates_cap</code> (int ≥ 1) — how many top ideas/seeds to expand per cycle. Default: 60.</li>
+                                        <li><code>expansion_token_filter</code> (bool) — only expand ideas containing a token from the category name. Default: <code>true</code>.</li>
+                                        <li><code>expand_max_depth</code> (1|2) — 1 = only expand ideas; 2 = may expand top related outputs (depth 2). Default: 1.</li>
+                                        <li><code>expand_related_limit_per_seed</code> (int 1..100) — items per seed for Labs related. Default: 20 (we suggest 30–50 for breadth).</li>
+                                        <li><code>suggest_enable</code> (bool) — include Labs search suggestions (autocomplete). Default: <code>false</code>.</li>
+                                        <li><code>suggest_limit_per_seed</code> (int) — suggestions per seed. Default: 20.</li>
+                                        <li><code>max_total_keywords_per_cat</code> (int) — hard cap of saved keywords per category+language. Default: 500.</li>
+                                    </ul>
+
+                                    <h4>Batching sizes (per task)</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>ideas_seeds_per_task</code> (int 1..20) — seeds per Ideas task. Default: 20.</li>
+                                        <li><code>volume_keywords_per_task</code> (int 1..1000) — keywords per Volume task. Default: 1000.</li>
+                                        <li><em>Note:</em> The aggregator additionally groups up to <code>tasks_per_http_post</code> tasks into one HTTP POST.</li>
+                                    </ul>
+
+                                    <h4>Caps & budgets</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>max_cats_per_run</code> (int) — limit categories processed per refresh. Default: 50.</li>
+                                        <li><code>max_tasks_per_run</code> (int) — limit tasks posted per refresh. Default: 1000.</li>
+                                        <li><code>budget_cap_credits</code> (int) — soft ceiling for estimated credits; the run will bail before exceeding it. Default: 1000.</li>
+                                    </ul>
+
+                                    <h4>Follow‑ups gating & poll throttle</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>followups_mode</code> ("immediate"|"gated") — run follow‑ups now or after settling. Default: <code>"immediate"</code>.</li>
+                                        <li><code>settle_hours</code> (int ≥ 1) — max wait window for a gated run. Default: 24.</li>
+                                        <li><code>min_ready_ratio</code> (0..1) — open the gate once ≥ this fraction of Ideas are complete. Default: 0.9.</li>
+                                        <li><code>poll_min_interval_minutes</code> (int ≥ 0) — skip poll cycles until this interval elapses. Default: 600 (10h).</li>
+                                    </ul>
+
+                                    <h4>PAA & Forecasts</h4>
+                                    <ul style="list-style:disc; margin-left:20px">
+                                        <li><code>paa_max_seeds_per_cat</code> (int) — SERP PAA seeds per category; async only. Default: 1.</li>
+                                        <li><code>forecast_enable</code> (bool) — enable Ads forecasts (async). Default: <code>false</code>.</li>
+                                    </ul>
+
+                                    <h4>Profiles you can start with</h4>
+                                    <pre style="white-space:pre-wrap"><code>// Fast + Batched (during sprints)
+{
+  "ideas_mode":"async","related_mode":"live","volume_mode":"async","paa_mode":"async",
+  "global_batching_enable":true,"tasks_per_http_post":100,
+  "smart_fill_enable":true,"target_keywords_per_cat":300,"max_smart_cycles_per_run":2,
+  "expansion_enable":true,"expansion_candidates_cap":60,"expansion_token_filter":true,
+  "expand_related_limit_per_seed":50,
+  "followups_mode":"gated","settle_hours":3,"min_ready_ratio":0.95,
+  "poll_min_interval_minutes":0,
+  "ideas_seeds_per_task":20,"volume_keywords_per_task":1000,
+  "max_cats_per_run":200,"max_tasks_per_run":5000,
+  "paa_max_seeds_per_cat":1
+}
+
+// Cost‑controlled (batch late)
+{
+  "ideas_mode":"async","related_mode":"live","volume_mode":"async","paa_mode":"async",
+  "global_batching_enable":true,"tasks_per_http_post":60,
+  "smart_fill_enable":true,"target_keywords_per_cat":200,"max_smart_cycles_per_run":1,
+  "expansion_enable":true,"expansion_candidates_cap":30,"expansion_token_filter":true,
+  "expand_related_limit_per_seed":30,
+  "followups_mode":"gated","settle_hours":24,"min_ready_ratio":0.95,
+  "poll_min_interval_minutes":15,
+  "ideas_seeds_per_task":20,"volume_keywords_per_task":1000,
+  "max_cats_per_run":50,"max_tasks_per_run":600,
+  "paa_max_seeds_per_cat":1
 }</code></pre>
                                 </div>
                             </details>
@@ -729,8 +832,10 @@ final class DS_Keywords {
 
     // ----- Cron handlers -----
     public static function cron_refresh(){
-        $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_refresh: missing auth'); return; }
-        $map = self::get_lang_map(); if (!$map){ self::log_write('warn','cron_refresh: missing language map'); return; }
+        // Correlate this refresh run
+        self::$run_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : ( 'run-'.uniqid('', true) );
+        $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_refresh: missing auth', ['run_tag'=>self::$run_id]); return; }
+        $map = self::get_lang_map(); if (!$map){ self::log_write('warn','cron_refresh: missing language map', ['run_tag'=>self::$run_id]); return; }
 
         $limits = self::get_limits();
         $maxCatsPerRun  = (int)($limits['max_cats_per_run'] ?? 50);
@@ -741,6 +846,7 @@ final class DS_Keywords {
         $catsProcessed = 0; $tasksPosted = 0; $seedsCount = 0;
 
         self::log_write('info','cron_refresh: start', ['action'=>'cron_refresh','response'=>['maxCats'=>$maxCatsPerRun,'maxTasks'=>$maxTasksPerRun]]);
+        self::pipeline_log('refresh','start', null, null, ['maxCats'=>$maxCatsPerRun,'maxTasks'=>$maxTasksPerRun]);
         $tasks = []; $ctxs  = [];
 
         $langs = self::get_languages();
@@ -767,6 +873,7 @@ final class DS_Keywords {
                 $seeds = self::build_seeds_for_term_lang($tobj, $lang);
                 if (!$seeds) continue;
                 $seedsCount += count($seeds);
+                self::pipeline_log('seeds','built', $term_id_lang, $lang, ['count'=>count($seeds), 'examples'=>array_slice($seeds,0,3)]);
 
                 $groups = array_chunk($seeds, $seeds_per_task);
                 $ideas_mode = self::get_mode('ideas_mode');
@@ -918,6 +1025,8 @@ final class DS_Keywords {
                 self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/ad_traffic_by_keywords','action'=>'poll_skip']);
             }
         }
+        // Ensure any globally aggregated batches are flushed within this poll request
+        self::agg_flush_all($auth);
         self::log_write('info','cron_poll: done', ['action'=>'cron_poll']);
     }
 
@@ -962,7 +1071,25 @@ final class DS_Keywords {
         $s = is_string($data) ? $data : wp_json_encode($data);
         if (!is_string($s)) return null;
         $s = preg_replace('/\s+/', ' ', $s);
-        return substr($s, 0, 2000);
+        $len = (int) get_option(self::OPT_LOG_SNIPPET, 2000);
+        if ($len < 200) $len = 200; if ($len > 20000) $len = 20000;
+        return substr($s, 0, $len);
+    }
+
+    // ----- Pipeline logging (structured) -----
+    private static function pipeline_log($stage, $status, $term_id = null, $lang = null, $extra = [], $cycle = 0){
+        // Keep existing logging system; this adds structured entries under endpoint 'ds-pipeline'
+        $action = trim((string)$stage).':'.trim((string)$status);
+        $resp = is_array($extra) ? $extra : ['note'=>(string)$extra];
+        if ($cycle !== null) { $resp['cycle'] = (int)$cycle; }
+        self::log_write('info', 'pipeline', [
+            'endpoint' => 'ds-pipeline',
+            'action'   => $action,
+            'term_id'  => $term_id ? (int)$term_id : null,
+            'lang'     => $lang ? (string)$lang : null,
+            'response' => $resp,
+            'run_tag'  => self::$run_id
+        ]);
     }
 
     // ----- Live response reuse from logs (last 2 days) -----
@@ -1130,6 +1257,10 @@ final class DS_Keywords {
                 'suggest_enable' => false, // use Labs search_suggestions
                 'suggest_limit_per_seed' => 20,
                 'max_total_keywords_per_cat' => 500,
+                // Smart fill knobs
+                'smart_fill_enable' => true,
+                'target_keywords_per_cat' => 300,
+                'max_smart_cycles_per_run' => 2,
                 // Modes: 'async' (post & poll) or 'live' (immediate)
                 'ideas_mode' => 'async',
                 'related_mode' => 'async',
@@ -1799,6 +1930,120 @@ final class DS_Keywords {
             }
             if ($tasks){ self::dfs_post_tasks('keywords_data/google_ads/ad_traffic_by_keywords/task_post', $tasks, $ctxs, $auth); }
         }
+
+        // ---- Smart Fill (optional, top-up until target) ----
+        self::smart_fill_term_lang($term_id, $lang, $auth, $limits, $lang_code, $loc_code, $seed_tokens);
+    }
+
+    private static function smart_fill_term_lang($term_id, $lang, $auth, $limits, $lang_code, $loc_code, $seed_tokens){
+        if (empty($limits['smart_fill_enable'])) return;
+        global $wpdb; $tk = self::table_keywords();
+        $target = max(1, (int)($limits['target_keywords_per_cat'] ?? 300));
+        $max_cycles = max(1, (int)($limits['max_smart_cycles_per_run'] ?? 2));
+        $rel_limit = max(1, min(100, (int)($limits['expand_related_limit_per_seed'] ?? 50)));
+        $expand_cap = max(1, (int)($limits['expansion_candidates_cap'] ?? 60));
+        $use_filter = !empty($limits['expansion_token_filter']);
+
+        $expanded_key = 'ds_kw_related_expanded_'.$lang;
+        $expanded_raw = (string) get_term_meta($term_id, $expanded_key, true);
+        $expanded_list = [];
+        if ($expanded_raw !== ''){
+            $decoded = json_decode($expanded_raw, true);
+            if (is_array($decoded)) $expanded_list = array_values(array_filter(array_map('strval', $decoded)));
+        }
+
+        $current_count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tk} WHERE term_id=%d AND lang=%s", $term_id, $lang));
+        $cycle = 0;
+        while ($current_count < $target && $cycle < $max_cycles){
+            $cycle++;
+            self::pipeline_log('smart_fill','cycle_start', $term_id, $lang, ['current'=>$current_count,'target'=>$target], $cycle);
+            // Build seed candidates from existing keywords (ideas + related), favor higher volume
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT keyword, COALESCE(volume,0) vol, source FROM {$tk} WHERE term_id=%d AND lang=%s ORDER BY vol DESC, updated_at DESC LIMIT 200",
+                $term_id, $lang
+            ), ARRAY_A);
+            $to_expand = [];
+            foreach ($rows as $r){
+                $kw = (string)$r['keyword']; if ($kw==='') continue;
+                if ($use_filter){
+                    $kw_l = mb_strtolower($kw);
+                    $ok=false; foreach ($seed_tokens as $tok){ if ($tok && mb_stripos($kw_l, $tok)!==false){ $ok=true; break; } }
+                    if (!$ok) continue;
+                }
+                if (in_array($kw, $expanded_list, true)) continue; // already expanded in previous runs
+                $to_expand[] = $kw;
+                if (count($to_expand) >= $expand_cap) break;
+            }
+
+            if (empty($to_expand)){
+                self::pipeline_log('smart_fill','no_seeds', $term_id, $lang, ['reason'=>'no_candidates_after_filter_or_all_expanded'], $cycle);
+                break;
+            }
+
+            // Post Related live in aggregated batches; try reuse first
+            $posted = 0; $reused = 0;
+            foreach ($to_expand as $kw){
+                $payload_item = [
+                    'keyword' => $kw,
+                    'language_code' => $lang_code,
+                    'location_code' => $loc_code,
+                    'limit' => $rel_limit
+                ];
+                $reuse_saved = self::reuse_related_from_logs($payload_item, $term_id, $lang);
+                if ($reuse_saved > 0){ $reused++; continue; }
+                self::agg_add_related($payload_item, $term_id, $lang);
+                $posted++;
+            }
+            // Force flush Related now so this cycle can see results soon
+            self::pipeline_log('smart_fill','related_post_or_reuse', $term_id, $lang, ['posted'=>$posted,'reused'=>$reused], $cycle);
+            self::agg_flush_related($auth);
+
+            // Mark seeds as expanded to avoid duplicates next cycles/runs
+            $expanded_list = array_values(array_unique(array_merge($expanded_list, $to_expand)));
+            update_term_meta($term_id, $expanded_key, wp_json_encode($expanded_list));
+
+            // Delta Intent (live)
+            $intent_rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT keyword FROM {$tk} WHERE term_id=%d AND lang=%s AND (intent_main IS NULL OR intent_main='') LIMIT 2000", $term_id, $lang), ARRAY_A);
+            $pool_intent = array_values(array_unique(array_map(function($r){ return (string)$r['keyword']; }, $intent_rows)));
+            if (!empty($pool_intent)){
+                $intent_chunks = array_chunk($pool_intent, 1000);
+                $intent_saved_total = 0; $intent_posts = 0; $intent_fail = 0;
+                foreach ($intent_chunks as $ch){
+                    $payload = [[ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ]];
+                    $reuse_saved = self::reuse_intent_from_logs($payload[0], $term_id, $lang);
+                    if ($reuse_saved > 0){ $intent_saved_total += $reuse_saved; $intent_posts++; continue; }
+                    list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/search_intent/live', $payload, $auth);
+                    if ($err || $code < 200 || $code >= 300){ $intent_fail++; self::log_write('warn','intent live failed (smart_fill)', ['endpoint'=>'dataforseo_labs/google/search_intent/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]); }
+                    else { if (isset($json['tasks'][0]['result'][0]['items'])){ $items = $json['tasks'][0]['result'][0]['items']; self::handle_intent_items($items, $term_id, $lang); $intent_saved_total += is_array($items)?count($items):0; $intent_posts++; } }
+                }
+                self::pipeline_log('smart_fill','intent_saved', $term_id, $lang, ['posted_batches'=>$intent_posts,'items_saved'=>$intent_saved_total,'fail_batches'=>$intent_fail], $cycle);
+            }
+
+            // Delta Volume (async aggregated)
+            $volume_rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT keyword FROM {$tk} WHERE term_id=%d AND lang=%s AND volume IS NULL LIMIT 5000", $term_id, $lang), ARRAY_A);
+            $pool_volume = array_values(array_unique(array_map(function($r){ return (string)$r['keyword']; }, $volume_rows)));
+            if (!empty($pool_volume)){
+                $per_task = max(1, (int)($limits['volume_keywords_per_task'] ?? 1000));
+                $chunks = array_chunk($pool_volume, $per_task);
+                $v_tasks = 0;
+                foreach ($chunks as $ch){
+                    $payload_task = [ 'keywords'=>$ch, 'language_code'=>$lang_code, 'location_code'=>$loc_code ];
+                    $reuse_saved = self::reuse_volume_from_logs($payload_task, $term_id, $lang);
+                    if ($reuse_saved > 0){ continue; }
+                    self::agg_add_volume_task($payload_task, ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang]);
+                    $v_tasks++;
+                }
+                self::agg_flush_volume($auth);
+                self::pipeline_log('smart_fill','volume_posted', $term_id, $lang, ['tasks'=>$v_tasks,'per_task'=>$per_task], $cycle);
+            }
+
+            // Update current count and decide whether to continue
+            $new_count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tk} WHERE term_id=%d AND lang=%s", $term_id, $lang));
+            self::pipeline_log('smart_fill','cycle_end', $term_id, $lang, ['before'=>$current_count,'after'=>$new_count], $cycle);
+            $current_count = $new_count;
+        }
+        if ($current_count >= $target){ self::pipeline_log('smart_fill','target_reached', $term_id, $lang, ['count'=>$current_count,'target'=>$target]); }
+        else { self::pipeline_log('smart_fill','stopped', $term_id, $lang, ['count'=>$current_count,'target'=>$target,'cycles'=>$cycle]); }
     }
 
     private static function handle_related_result($result){
