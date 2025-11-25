@@ -1140,9 +1140,109 @@ final class DS_Keywords {
                 'followups_mode' => 'immediate', // 'immediate' or 'gated'
                 'settle_hours' => 24,
                 'min_ready_ratio' => 0.9,
-                'poll_min_interval_minutes' => 600 // 10 hours
+                'poll_min_interval_minutes' => 600, // 10 hours
+                // Global batching aggregator
+                'global_batching_enable' => true,
+                'tasks_per_http_post' => 100, // max 100 per DFSEO POST
+                'global_flush_after_minutes' => 20
         ];
         return array_replace($def, $arr);
+    }
+
+    // ----- Global batching aggregator (buffers + flush) -----
+    private static $agg_related = [];
+    private static $agg_related_ctx = [];
+    private static $agg_volume_tasks = [];
+    private static $agg_volume_ctx = [];
+
+    private static function agg_tasks_per_http_post(){
+        $limits = self::get_limits();
+        $n = isset($limits['tasks_per_http_post']) ? (int)$limits['tasks_per_http_post'] : 100;
+        if ($n < 1) $n = 1; if ($n > 100) $n = 100; return $n;
+    }
+    private static function agg_enabled(){
+        $limits = self::get_limits();
+        return !empty($limits['global_batching_enable']);
+    }
+
+    private static function agg_add_related($payload_item, $term_id, $lang){
+        if (!self::agg_enabled()) return false;
+        self::$agg_related[] = $payload_item;
+        self::$agg_related_ctx[] = ['term_id'=>$term_id,'lang'=>$lang];
+        return true;
+    }
+    private static function agg_flush_related($auth){
+        if (empty(self::$agg_related)) return;
+        $max = self::agg_tasks_per_http_post();
+        while (!empty(self::$agg_related)){
+            $batch = array_splice(self::$agg_related, 0, $max);
+            $ctxs  = array_splice(self::$agg_related_ctx, 0, $max);
+            self::log_write('info','related live batch request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','request'=>$batch]);
+            list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $batch, $auth);
+            if ($err || $code < 200 || $code >= 300){
+                self::log_write('warn','related live batch failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'response'=>$json]);
+                continue;
+            }
+            $tasks_arr = is_array($json['tasks'] ?? null) ? $json['tasks'] : [];
+            $normalized_total = 0; $nodes_total = 0; $saved_batch = 0;
+            foreach ($tasks_arr as $idx=>$task){
+                $items = (isset($task['result'][0]['items']) && is_array($task['result'][0]['items'])) ? $task['result'][0]['items'] : [];
+                $nodes_total += is_array($items)?count($items):0;
+                $norm = [];
+                foreach ($items as $it){
+                    if (isset($it['keyword_data'])){
+                        $kd = $it['keyword_data'];
+                        $kw2 = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                        $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                        $norm[] = array_merge(['keyword'=>$kw2], $info);
+                    } elseif (isset($it['keyword'])) {
+                        $norm[] = $it;
+                    }
+                }
+                $normalized_total += count($norm);
+                $ctx = $ctxs[$idx] ?? null;
+                if ($ctx && !empty($norm)){
+                    $saved_now = self::save_related_items($norm, (int)$ctx['term_id'], (string)$ctx['lang']);
+                    $saved_batch += $saved_now;
+                }
+            }
+            self::log_write('info','related live batch saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','response'=>['nodes'=>$nodes_total,'normalized'=>$normalized_total,'items_saved'=>$saved_batch]]);
+        }
+    }
+
+    private static function agg_add_volume_task($payload_task, $ctx){
+        if (!self::agg_enabled()) return false;
+        self::$agg_volume_tasks[] = $payload_task;
+        self::$agg_volume_ctx[] = $ctx;
+        return true;
+    }
+    private static function agg_flush_volume($auth){
+        if (empty(self::$agg_volume_tasks)) return;
+        $max = self::agg_tasks_per_http_post();
+        while (!empty(self::$agg_volume_tasks)){
+            $tasks = array_splice(self::$agg_volume_tasks, 0, $max);
+            $ctxs  = array_splice(self::$agg_volume_ctx, 0, $max);
+            self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth);
+        }
+    }
+
+    private static function agg_flush_all($auth){
+        if (!self::agg_enabled()) return;
+        self::agg_flush_related($auth);
+        self::agg_flush_volume($auth);
+    }
+
+    private static $agg_shutdown_registered = false;
+    private static function agg_register_shutdown_once($auth){
+        if (!self::agg_enabled()) return;
+        if (self::$agg_shutdown_registered) return;
+        self::$agg_shutdown_registered = true;
+        // Capture current auth for shutdown closure
+        $auth_copy = $auth;
+        add_action('shutdown', function() use ($auth_copy){
+            // Final flush of all aggregated endpoints
+            DS_Keywords::agg_flush_all($auth_copy);
+        }, 1);
     }
 
     // ----- Language helpers (Polylang-optional) -----
@@ -1428,49 +1528,127 @@ final class DS_Keywords {
         self::log_write('info','related candidates', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'plan','term_id'=>$term_id,'lang'=>$lang,'response'=>['candidates'=>count($to_expand)]]);
         if (!empty($to_expand) && !empty($limits['expansion_enable'])){
             $mode = self::get_mode('related_mode');
+            $rel_limit = max(1, min(100, (int)($limits['expand_related_limit_per_seed'] ?? 100)));
             if ($mode === 'live'){
-                $saved_total = 0; $posted = 0; $errors = 0;
-                foreach ($to_expand as $kw){
-                    $payload = [[
-                        'keyword' => $kw,
-                        'language_code' => $lang_code,
-                        'location_code' => $loc_code,
-                        'limit' => 100
-                    ]];
-                    // Try reuse from logs first
-                    $reuse_saved = self::reuse_related_from_logs($payload[0], $term_id, $lang);
-                    if ($reuse_saved > 0){
-                        $saved_total += $reuse_saved; $posted++;
-                        self::log_write('info','related live reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
-                        continue;
+                // Global aggregator path: collect across many term/lang and flush once per request
+                if (self::agg_enabled()){
+                    $saved_total = 0; $posted = 0;
+                    foreach ($to_expand as $kw){
+                        $payload_item = [
+                            'keyword' => $kw,
+                            'language_code' => $lang_code,
+                            'location_code' => $loc_code,
+                            'limit' => $rel_limit
+                        ];
+                        // Try reuse from logs first
+                        $reuse_saved = self::reuse_related_from_logs($payload_item, $term_id, $lang);
+                        if ($reuse_saved > 0){
+                            $saved_total += $reuse_saved; $posted++;
+                            self::log_write('info','related live reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                            continue;
+                        }
+                        self::agg_add_related($payload_item, $term_id, $lang);
+                        $posted++;
                     }
-                    self::log_write('info','related live request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$payload]);
-                    list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $payload, $auth);
-                    if ($err || $code < 200 || $code >= 300){
-                        $errors++; self::log_write('warn','related live failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang]);
-                        continue;
-                    }
-                    $items = isset($json['tasks'][0]['result'][0]['items']) && is_array($json['tasks'][0]['result'][0]['items']) ? $json['tasks'][0]['result'][0]['items'] : [];
-                    $nodes_count = is_array($items)?count($items):0;
-                    $norm = [];
-                    if (is_array($items)){
-                        foreach ($items as $it){
-                            if (isset($it['keyword_data'])){
-                                $kd = $it['keyword_data'];
-                                $kw = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
-                                $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
-                                $norm[] = array_merge(['keyword'=>$kw], $info);
-                            } elseif (isset($it['keyword'])) {
-                                $norm[] = $it;
+                    // Register a once-per-request shutdown flush to send few big POSTs
+                    self::agg_register_shutdown_once($auth);
+                    self::log_write('info','related live summary (aggregated)', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds_buffered'=>$posted,'saved_reused'=>$saved_total]]);
+                } else {
+                    // Fallback to immediate per-term live-batching
+                    $saved_total = 0; $posted = 0; $errors = 0;
+                    $max_batch = 100; // number of seed tasks per HTTP POST
+                    $batch = [];
+                    $seeds_in_batch = 0;
+
+                    foreach ($to_expand as $kw){
+                        $payload_item = [
+                            'keyword' => $kw,
+                            'language_code' => $lang_code,
+                            'location_code' => $loc_code,
+                            'limit' => $rel_limit
+                        ];
+                        // Try reuse from logs first
+                        $reuse_saved = self::reuse_related_from_logs($payload_item, $term_id, $lang);
+                        if ($reuse_saved > 0){
+                            $saved_total += $reuse_saved; $posted++;
+                            self::log_write('info','related live reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
+                            continue;
+                        }
+                        $batch[] = $payload_item;
+                        $seeds_in_batch++;
+                        $posted++;
+
+                        if (count($batch) >= $max_batch){
+                            self::log_write('info','related live batch request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$batch]);
+                            list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $batch, $auth);
+                            if ($err || $code < 200 || $code >= 300){
+                                $errors++; self::log_write('warn','related live batch failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang,'response'=>$json]);
+                            } else {
+                                $tasks_arr = is_array($json['tasks'] ?? null) ? $json['tasks'] : [];
+                                $normalized_total = 0; $nodes_total = 0; $saved_batch = 0;
+                                foreach ($tasks_arr as $task){
+                                    $items = (isset($task['result'][0]['items']) && is_array($task['result'][0]['items'])) ? $task['result'][0]['items'] : [];
+                                    $nodes_count = is_array($items)?count($items):0;
+                                    $nodes_total += $nodes_count;
+                                    $norm = [];
+                                    foreach ($items as $it){
+                                        if (isset($it['keyword_data'])){
+                                            $kd = $it['keyword_data'];
+                                            $kw2 = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                                            $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                                            $norm[] = array_merge(['keyword'=>$kw2], $info);
+                                        } elseif (isset($it['keyword'])) {
+                                            $norm[] = $it;
+                                        }
+                                    }
+                                    $normalized_total += count($norm);
+                                    if (!empty($norm)){
+                                        $saved_now = self::save_related_items($norm, $term_id, $lang);
+                                        $saved_batch += $saved_now;
+                                    }
+                                }
+                                self::log_write('info','related live batch saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds'=>$seeds_in_batch,'nodes'=>$nodes_total,'normalized'=>$normalized_total,'items_saved'=>$saved_batch]]);
+                                $saved_total += $saved_batch;
                             }
+                            $batch = []; $seeds_in_batch = 0;
                         }
                     }
-                    self::log_write('info','related live nodes', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['nodes'=>$nodes_count,'normalized'=>count($norm)]]);
-                    $saved = self::save_related_items($norm, $term_id, $lang);
-                    $saved_total += $saved; $posted++;
-                    self::log_write('info','related live saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$saved]]);
+                    // flush final batch
+                    if (!empty($batch)){
+                        self::log_write('info','related live batch request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$batch]);
+                        list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $batch, $auth);
+                        if ($err || $code < 200 || $code >= 300){
+                            $errors++; self::log_write('warn','related live batch failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang,'response'=>$json]);
+                        } else {
+                            $tasks_arr = is_array($json['tasks'] ?? null) ? $json['tasks'] : [];
+                            $normalized_total = 0; $nodes_total = 0; $saved_batch = 0;
+                            foreach ($tasks_arr as $task){
+                                $items = (isset($task['result'][0]['items']) && is_array($task['result'][0]['items'])) ? $task['result'][0]['items'] : [];
+                                $nodes_count = is_array($items)?count($items):0;
+                                $nodes_total += $nodes_count;
+                                $norm = [];
+                                foreach ($items as $it){
+                                    if (isset($it['keyword_data'])){
+                                        $kd = $it['keyword_data'];
+                                        $kw2 = isset($kd['keyword']) ? (string)$kd['keyword'] : '';
+                                        $info = (isset($kd['keyword_info']) && is_array($kd['keyword_info'])) ? $kd['keyword_info'] : [];
+                                        $norm[] = array_merge(['keyword'=>$kw2], $info);
+                                    } elseif (isset($it['keyword'])) {
+                                        $norm[] = $it;
+                                    }
+                                }
+                                $normalized_total += count($norm);
+                                if (!empty($norm)){
+                                    $saved_now = self::save_related_items($norm, $term_id, $lang);
+                                    $saved_batch += $saved_now;
+                                }
+                            }
+                            self::log_write('info','related live batch saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds'=>$seeds_in_batch,'nodes'=>$nodes_total,'normalized'=>$normalized_total,'items_saved'=>$saved_batch]]);
+                            $saved_total += $saved_batch;
+                        }
+                    }
+                    self::log_write('info','related live summary', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds_posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
                 }
-                self::log_write('info','related live summary', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
             } else {
                 $tasks=[]; $ctxs=[]; $max_batch=100;
                 foreach ($to_expand as $kw){
@@ -1573,10 +1751,19 @@ final class DS_Keywords {
                         self::log_write('info','volume async reuse hit', ['endpoint'=>'keywords_data/google_ads/search_volume/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
                         continue;
                     }
-                    $tasks[] = $payload_task;
-                    $ctxs[]  = ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang];
+                    if (self::agg_enabled()){
+                        self::agg_add_volume_task($payload_task, ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang]);
+                    } else {
+                        $tasks[] = $payload_task;
+                        $ctxs[]  = ['endpoint'=>'keywords_data/google_ads/search_volume','term_id'=>$term_id,'lang'=>$lang,'tag'=>'volume:'.$term_id.':'.$lang];
+                    }
                 }
-                if ($tasks){ self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth); }
+                if (self::agg_enabled()){
+                    self::agg_register_shutdown_once($auth);
+                    self::log_write('info','volume async summary (aggregated)', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['tasks_buffered'=>count($chunks)]]);
+                } else if ($tasks){
+                    self::dfs_post_tasks('keywords_data/google_ads/search_volume/task_post', $tasks, $ctxs, $auth);
+                }
             }
         }
 
