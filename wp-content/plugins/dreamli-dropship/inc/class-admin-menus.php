@@ -19,16 +19,29 @@ final class DS_Admin_Menus {
             58
         );
 
-        add_submenu_page('ds-root','Settings','Settings','manage_options','ds-settings',[__CLASS__,'settings']);
-        add_submenu_page('ds-root','Ledger','Ledger','manage_options','ds-ledger',[__CLASS__,'ledger']);
-        add_submenu_page('ds-root','Orders Report','Orders Report','manage_options','ds-orders-report',[__CLASS__,'orders_report']);
-        add_submenu_page('ds-root','Leaderboard','Leaderboard','manage_options','ds-leaderboard-admin',[__CLASS__,'leaderboard']);
-        add_submenu_page('ds-root','Entitlements Manager','Entitlements Manager','manage_options','ds-entitlements-manager',[__CLASS__,'entitlements_manager']);
+        // Always show Dashboard and Settings
         add_submenu_page('ds-root','Dashboard','Dashboard','manage_options','ds-dashboard',[__CLASS__,'dashboard']);
+        add_submenu_page('ds-root','Settings','Settings','manage_options','ds-settings',[__CLASS__,'settings']);
+
+        $o = DS_Settings::get();
+        if (!empty($o['feature_wallet'])) {
+            add_submenu_page('ds-root','Ledger','Ledger','manage_options','ds-ledger',[__CLASS__,'ledger']);
+        }
+        if (!empty($o['feature_orders'])) {
+            add_submenu_page('ds-root','Orders Report','Orders Report','manage_options','ds-orders-report',[__CLASS__,'orders_report']);
+        }
+        if (!empty($o['feature_leaderboard'])) {
+            add_submenu_page('ds-root','Leaderboard','Leaderboard','manage_options','ds-leaderboard-admin',[__CLASS__,'leaderboard']);
+        }
+        if (!empty($o['feature_entitlements'])) {
+            add_submenu_page('ds-root','Entitlements Manager','Entitlements Manager','manage_options','ds-entitlements-manager',[__CLASS__,'entitlements_manager']);
+        }
     }
 
     static function root() {
-        echo '<div class="wrap"><h1>Dreamli Dropship</h1><p>Use submenus.</p></div>';
+        if (!current_user_can('manage_options')) wp_die('No access.');
+        wp_safe_redirect(admin_url('admin.php?page=ds-dashboard'));
+        exit;
     }
 
     static function settings() {
@@ -805,6 +818,41 @@ final class DS_Admin_Menus {
 
     static function dashboard() {
         if (!current_user_can('manage_options')) wp_die('No access.');
+        // Handle feature toggles save
+        if (isset($_POST['ds_features_save']) && check_admin_referer('ds_features')) {
+            $feature_keys = [
+                'feature_vendor_menus','feature_wallet','feature_orders','feature_content',
+                'feature_calculator','feature_editor_ui','feature_pricing','feature_material_options',
+                'feature_ai_product_seo','feature_ads','feature_views','feature_leaderboard',
+                'feature_entitlements','feature_snapshots','feature_keywords','feature_embeddings',
+                'feature_drive_importer'
+            ];
+            $new = [];
+            foreach ($feature_keys as $k) { $new[$k] = isset($_POST[$k]) ? 1 : 0; }
+            DS_Settings::update($new);
+            echo '<div class="notice notice-success is-dismissible"><p>Features updated.</p></div>';
+        }
+        $o = DS_Settings::get();
+        $feature_labels = [
+            'feature_vendor_menus'=>'Vendor Menus',
+            'feature_wallet'=>'Wallet/Ledger',
+            'feature_orders'=>'Orders',
+            'feature_content'=>'Content Moderation',
+            'feature_calculator'=>'Simple Calculator',
+            'feature_editor_ui'=>'Editor UI',
+            'feature_pricing'=>'Pricing Engine',
+            'feature_material_options'=>'Material Options',
+            'feature_ai_product_seo'=>'AI Product SEO',
+            'feature_ads'=>'Ads (CPC)',
+            'feature_views'=>'Product Views + Payouts',
+            'feature_leaderboard'=>'Leaderboard',
+            'feature_entitlements'=>'Entitlements',
+            'feature_snapshots'=>'Snapshots',
+            'feature_keywords'=>'Keywords (DataForSEO)',
+            'feature_embeddings'=>'Embeddings',
+            'feature_drive_importer'=>'Drive Importer'
+        ];
+
         $preset = isset($_GET['preset']) ? sanitize_key($_GET['preset']) : 'weekly';
         $from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
         $to   = isset($_GET['to']) ? sanitize_text_field($_GET['to']) : '';
@@ -812,7 +860,7 @@ final class DS_Admin_Menus {
         $from_d = substr($start,0,10); $to_d = substr($end,0,10);
 
         global $wpdb;
-        $vt = class_exists('DS_Views') ? DS_Views::table() : '';
+        $vt = (!empty($o['feature_views']) && class_exists('DS_Views')) ? DS_Views::table() : '';
         $wt = DS_Wallet::table();
 
         // KPIs
@@ -835,6 +883,51 @@ final class DS_Admin_Menus {
         echo '<label>To: <input type="date" name="to" value="'.esc_attr($to_d).'"></label> ';
         echo '<button class="button">Apply</button>';
         echo '</form>';
+
+        // Quick Links
+        echo '<div class="card" style="padding:12px;max-width:1100px;background:#fff;border:1px solid #e5e5e5;margin-bottom:12px;">';
+        echo '<h2 style="margin-top:0;">Quick Links</h2>';
+        $links = [];
+        $links[] = ['Settings', admin_url('admin.php?page=ds-settings'), true];
+        if (!empty($o['feature_wallet']))       $links[] = ['Ledger', admin_url('admin.php?page=ds-ledger'), true];
+        if (!empty($o['feature_orders']))       $links[] = ['Orders Report', admin_url('admin.php?page=ds-orders-report'), true];
+        if (!empty($o['feature_leaderboard']))  $links[] = ['Leaderboard', admin_url('admin.php?page=ds-leaderboard-admin'), true];
+        if (!empty($o['feature_entitlements'])) $links[] = ['Entitlements Manager', admin_url('admin.php?page=ds-entitlements-manager'), true];
+        if (!empty($o['feature_ai_product_seo']) && class_exists('DS_AI_Product_SEO')) $links[] = ['AI Generator', admin_url('admin.php?page=ds-ai-generator'), true];
+        if (!empty($o['feature_keywords']) && class_exists('DS_Keywords')) {
+            $links[] = ['Keywords', admin_url('admin.php?page=ds-keywords'), true];
+            $links[] = ['Keywords Logs', admin_url('admin.php?page=ds-keywords-logs'), true];
+        }
+        if (!empty($o['feature_embeddings']) && class_exists('DS_Embeddings')) {
+            $links[] = ['Embeddings', admin_url('admin.php?page=ds-embeddings'), true];
+            $links[] = ['Embeddings Logs', admin_url('admin.php?page=ds-embeddings-logs'), true];
+        }
+        echo '<p style="display:flex;flex-wrap:wrap;gap:8px;">';
+        foreach ($links as $L) {
+            printf('<a class="button" href="%s">%s</a>', esc_url($L[1]), esc_html($L[0]));
+        }
+        echo '</p>';
+        echo '</div>';
+
+        // Feature Toggles
+        echo '<div class="card" style="padding:12px;max-width:1100px;background:#fff;border:1px solid #e5e5e5;margin-bottom:12px;">';
+        echo '<h2 style="margin-top:0;">Features</h2>';
+        echo '<form method="post">';
+        echo wp_nonce_field('ds_features', '_wpnonce', true, false);
+        echo '<table class="widefat striped" style="max-width:760px;"><tbody>';
+        foreach ($feature_labels as $key=>$label) {
+            $checked = !empty($o[$key]) ? 'checked' : '';
+            echo '<tr>';
+            printf('<td><label for="%s"><b>%s</b></label></td>', esc_attr($key), esc_html($label));
+            echo '<td style="width:140px;">';
+            printf('<label><input type="checkbox" name="%s" id="%s" value="1" %s> Enabled</label>', esc_attr($key), esc_attr($key), $checked);
+            echo '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+        echo '<p><button class="button button-primary" name="ds_features_save" value="1">Save Features</button></p>';
+        echo '</form>';
+        echo '</div>';
 
         echo '<div class="card" style="padding:12px;max-width:1100px;background:#fff;border:1px solid #e5e5e5;">';
         printf('<p><b>Total Views:</b> %d &nbsp; | &nbsp; <b>Total View Payouts:</b> €%0.2f &nbsp; | &nbsp; <b>Total Earnings (+):</b> €%0.2f &nbsp; | &nbsp; <b>Total Spend (−):</b> €%0.2f &nbsp; | &nbsp; <b>New Products:</b> %d</p>', $total_views, $total_view_payouts, $total_earned, $total_spent, $new_products);

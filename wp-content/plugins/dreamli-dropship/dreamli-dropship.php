@@ -77,23 +77,26 @@ add_action('plugins_loaded', function () {
     // بارگذاری ماژول‌ها
     DS_Settings::init();
     DS_Roles::init();
-    DS_Wallet::init();
-    DS_Content::init();
-    DS_Orders::init();
-    DS_Vendor_Menus::init();
+    $opt = DS_Settings::get();
+
+    if (!empty($opt['feature_wallet']))            { DS_Wallet::init(); }
+    if (!empty($opt['feature_content']))           { DS_Content::init(); }
+    if (!empty($opt['feature_orders']))            { DS_Orders::init(); }
+    if (!empty($opt['feature_vendor_menus']))      { DS_Vendor_Menus::init(); }
+    // Admin menus must always be available as the landing/dashboard
     DS_Admin_Menus::init();
-    DS_Calculator::init();
-	DS_Editor_UI::init();
-	DS_Pricing::init();
-	DS_Material_Options::init();
-	DS_AI_Product_SEO::init();
-	DS_Ads::init();
-	DS_Views::init();
-	DS_Entitlements::init();
-    DS_Snapshots::init();
-    DS_Keywords::init();
-   	DS_Embeddings::init();
-	DS_Drive_Importer::init();
+    if (!empty($opt['feature_calculator']))        { DS_Calculator::init(); }
+	if (!empty($opt['feature_editor_ui']))          { DS_Editor_UI::init(); }
+	if (!empty($opt['feature_pricing']))            { DS_Pricing::init(); }
+	if (!empty($opt['feature_material_options']))   { DS_Material_Options::init(); }
+	if (!empty($opt['feature_ai_product_seo']))     { DS_AI_Product_SEO::init(); }
+	if (!empty($opt['feature_ads']))                { DS_Ads::init(); }
+	if (!empty($opt['feature_views']))              { DS_Views::init(); }
+	if (!empty($opt['feature_entitlements']))       { DS_Entitlements::init(); }
+    if (!empty($opt['feature_snapshots']))         { DS_Snapshots::init(); }
+    if (!empty($opt['feature_keywords']))          { DS_Keywords::init(); }
+   	if (!empty($opt['feature_embeddings']))        { DS_Embeddings::init(); }
+	if (!empty($opt['feature_drive_importer']))     { DS_Drive_Importer::init(); }
 	// Ensure Ads table exists on updates (without reactivation)
 	if (class_exists('DS_Ads') && method_exists('DS_Ads','table') && method_exists('DS_Ads','install')) {
 		if (!DS_Helpers::db_table_exists(DS_Ads::table())) { DS_Ads::install(); }

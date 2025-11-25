@@ -25,6 +25,24 @@ final class DS_Settings {
         ];
 
         return [
+            // --- Feature toggles
+            'feature_vendor_menus' => 1,
+            'feature_wallet' => 1,
+            'feature_orders' => 1,
+            'feature_content' => 1,
+            'feature_calculator' => 1,
+            'feature_editor_ui' => 1,
+            'feature_pricing' => 1,
+            'feature_material_options' => 1,
+            'feature_ai_product_seo' => 1,
+            'feature_ads' => 1,
+            'feature_views' => 1,
+            'feature_leaderboard' => 1,
+            'feature_entitlements' => 1,
+            'feature_snapshots' => 1,
+            'feature_keywords' => 1,
+            'feature_embeddings' => 1,
+            'feature_drive_importer' => 1,
             // --- Claim & Re-claim Fees (dynamic)
             'claim_fee_enable' => 1,
             'entitlement_dynamic_fee_enable' => 1,
