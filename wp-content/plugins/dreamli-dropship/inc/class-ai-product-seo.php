@@ -408,8 +408,15 @@ final class DS_AI_Product_SEO {
         self::log_start($run_id);
         self::log($run_id, date('H:i:s') . " — Queueing op={$op} model={$model} post_id={$post_id}");
 
-        $args = ['post_id'=>$post_id,'model'=>$model,'op'=>$op,'run_id'=>$run_id];
+        // If Polylang is active, orchestrate for all languages (create missing translations and queue runs)
+        if (function_exists('pll_languages_list') && function_exists('pll_get_post_language')) {
+            $summary = self::generate_all_languages($post_id, $model, $op, $run_id);
+            $msg = 'Queued '.$summary['scheduled'].' runs across languages: '.implode(', ', $summary['langs']);
+            self::json_success(['msg'=>$msg, 'details'=>$summary]);
+        }
 
+        // Fallback: single post behavior if Polylang is not active
+        $args = ['post_id'=>$post_id,'model'=>$model,'op'=>$op,'run_id'=>$run_id];
         $runner = get_option(self::OPT_RUNNER, 'as');
         if ($runner === 'as' && function_exists('as_enqueue_async_action')) {
             // Enqueue via Action Scheduler
@@ -428,6 +435,144 @@ final class DS_AI_Product_SEO {
         self::spawn_direct($args, $run_id);
         self::schedule_fallback($args, $run_id, 10);
         self::json_success(['msg'=>'Queued. Background worker will process…']);
+    }
+
+    // ===================== Multi-language Orchestrator =====================
+    private static function generate_all_languages($post_id, $model, $op, $parent_run_id){
+        $langs = function_exists('pll_languages_list') ? (array) pll_languages_list(['fields'=>'slug']) : [];
+        if (empty($langs)) {
+            // No polylang languages; queue single
+            $args = ['post_id'=>$post_id,'model'=>$model,'op'=>$op,'run_id'=>$parent_run_id];
+            $runner = get_option(self::OPT_RUNNER, 'as');
+            if ($runner === 'as' && function_exists('as_enqueue_async_action')) {
+                try { as_enqueue_async_action(self::ENQUEUE_HOOK, [$args], 'ds-ai'); } catch (Exception $e) {}
+            } else { self::spawn_direct($args, $parent_run_id); self::schedule_fallback($args, $parent_run_id, 10); }
+            return ['created'=>0,'scheduled'=>1,'langs'=>['default'],'runs'=>[['lang'=>'default','post_id'=>$post_id,'run_id'=>$parent_run_id]]];
+        }
+
+        $source_lang = function_exists('pll_get_post_language') ? (string) pll_get_post_language($post_id) : '';
+        if ($source_lang==='') $source_lang = $langs[0];
+
+        // Build translation map lang=>post_id, creating missing ones
+        $translations = [];
+        $created = 0;
+        foreach ($langs as $lang){
+            $tid = function_exists('pll_get_post') ? (int) pll_get_post($post_id, $lang) : 0;
+            if (!$tid){
+                if ($lang === $source_lang) { $tid = $post_id; }
+                else {
+                    $tid = self::duplicate_product_to_language($post_id, $lang);
+                    if ($tid) { $created++; }
+                }
+            }
+            if ($tid) { $translations[$lang] = $tid; }
+        }
+        // Link translations as a group
+        if (function_exists('pll_save_post_translations') && count($translations) >= 1){
+            try { pll_save_post_translations($translations); } catch (Exception $e) { /* ignore */ }
+        }
+
+        // Queue one AI generation per language post
+        $runs = [];
+        $scheduled = 0;
+        $runner = get_option(self::OPT_RUNNER, 'as');
+        foreach ($translations as $lang=>$pid){
+            // Generate unique run_id for each job; log into parent log
+            $rid = 'r'.dechex(time()).substr(md5($lang.$pid.microtime(true)),0,6);
+            self::log($parent_run_id, 'Scheduling ['.$lang."] post_id=".$pid.' run_id='.$rid);
+            $args = ['post_id'=>$pid,'model'=>$model,'op'=>$op,'run_id'=>$rid];
+            if ($runner === 'as' && function_exists('as_enqueue_async_action')) {
+                try {
+                    as_enqueue_async_action(self::ENQUEUE_HOOK, [$args], 'ds-ai');
+                    $scheduled++;
+                } catch (Exception $e) {
+                    self::log($parent_run_id, 'AS enqueue failed for '.$lang.': '.$e->getMessage().' — falling back to Direct');
+                    self::spawn_direct($args, $rid);
+                    self::schedule_fallback($args, $rid, 10);
+                    $scheduled++;
+                }
+            } else {
+                self::spawn_direct($args, $rid);
+                self::schedule_fallback($args, $rid, 10);
+                $scheduled++;
+            }
+            $runs[] = ['lang'=>$lang,'post_id'=>$pid,'run_id'=>$rid];
+        }
+
+        self::log($parent_run_id, 'Summary: created='.$created.' translations; scheduled='.$scheduled.' runs.');
+        return ['created'=>$created,'scheduled'=>$scheduled,'langs'=>array_keys($translations),'runs'=>$runs];
+    }
+
+    private static function duplicate_product_to_language($src_id, $lang){
+        $src = get_post($src_id);
+        if (!$src || $src->post_type !== 'product') return 0;
+
+        $new_post = [
+            'post_type'   => 'product',
+            'post_status' => 'draft',
+            'post_title'  => $src->post_title,
+            'post_content'=> $src->post_content,
+            'post_excerpt'=> $src->post_excerpt,
+            'post_author' => $src->post_author,
+        ];
+        $new_id = wp_insert_post($new_post);
+        if (is_wp_error($new_id) || !$new_id) return 0;
+
+        // Set Polylang language on new post
+        if (function_exists('pll_set_post_language')) { pll_set_post_language($new_id, $lang); }
+
+        // Copy featured image and gallery
+        $thumb_id = get_post_thumbnail_id($src_id);
+        if ($thumb_id) { set_post_thumbnail($new_id, $thumb_id); }
+        $gallery = get_post_meta($src_id, '_product_image_gallery', true);
+        if (!empty($gallery)) { update_post_meta($new_id, '_product_image_gallery', $gallery); }
+
+        // Copy categories (map to translated term if available)
+        $src_terms = wp_get_post_terms($src_id, 'product_cat', ['fields'=>'ids']);
+        if (!is_wp_error($src_terms) && !empty($src_terms)){
+            $dst_terms = [];
+            foreach ($src_terms as $tid){
+                $mapped = function_exists('pll_get_term') ? (int) pll_get_term($tid, $lang) : 0;
+                $dst_terms[] = $mapped ?: (int)$tid;
+            }
+            wp_set_post_terms($new_id, array_values(array_unique(array_filter($dst_terms))), 'product_cat');
+        }
+
+        // Copy core WooCommerce meta (copy all non-internal keys)
+        $all_meta = get_post_meta($src_id);
+        $skip_keys = ['_edit_lock','_edit_last','_thumbnail_id','_wp_old_slug'];
+        foreach ($all_meta as $k=>$vals){
+            if (in_array($k, $skip_keys, true)) continue;
+            // Avoid duplicating gallery (already set)
+            if ($k === '_product_image_gallery') continue;
+            foreach ($vals as $v){
+                // Update multiple values if array
+                update_post_meta($new_id, $k, maybe_unserialize($v));
+            }
+        }
+
+        // Duplicate variations if any
+        $children = get_children(['post_parent'=>$src_id,'post_type'=>'product_variation','post_status'=>'any','numberposts'=>-1]);
+        if (!empty($children)){
+            foreach ($children as $child){
+                $new_var = [
+                    'post_type'   => 'product_variation',
+                    'post_status' => 'publish',
+                    'post_parent' => $new_id,
+                    'menu_order'  => (int)$child->menu_order,
+                ];
+                $new_var_id = wp_insert_post($new_var);
+                if (!is_wp_error($new_var_id) && $new_var_id){
+                    $vmeta = get_post_meta($child->ID);
+                    foreach ($vmeta as $vk=>$vvals){
+                        if (in_array($vk, ['_edit_lock','_edit_last'], true)) continue;
+                        foreach ($vvals as $vv){ update_post_meta($new_var_id, $vk, maybe_unserialize($vv)); }
+                    }
+                }
+            }
+        }
+
+        return (int)$new_id;
     }
 
     /* ===================== Direct async worker endpoint ===================== */
