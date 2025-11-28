@@ -529,35 +529,26 @@ final class DS_AI_Product_SEO {
         self::log($run_id,'Keyword details/FAQ: kws_det='. (isset($ctx['keywords_detailed'])?count($ctx['keywords_detailed']):0) .', faq='.(isset($ctx['faq'])?count($ctx['faq']):0));
         self::log($run_id,'Category URL: ' . (!empty($ctx['category_url']) ? $ctx['category_url'] : '[none]'));
 
-        // Messages
+        // Messages (user input payload only — no long instructions inside)
         self::log($run_id,'Building messages…');
         $system = (string) get_option(self::OPT_SYSTEM_PROMPT, "You are an SEO copywriter...");
         $gen    = (string) get_option(self::OPT_PROMPT_GENERATE, self::default_generate_instructions());
 
-        $user_inputs = [
-            "PRODUCT INFORMATION" => [
-                "product_name"       => $post->post_title,
-                "product_category"   => $ctx['primary_cat_name'],
-                "keywords"           => $ctx['keywords'],
-                "keywords_detailed"  => $ctx['keywords_detailed'],
-                "faq"                => $ctx['faq'],
-                "note"               => "Images attached below. Analysis allowed."
-            ],
-            "INTERNAL LINKS (Optional)" => [
-                "category_url" => $ctx['category_url'] ?? ''
-            ],
-            "EXTERNAL LINK (Optional)" => $ctx['external_link'],
-            "USER EXPERIENCE INPUT (Optional)" => $ctx['story'] ?: ''
+        // Compact user payload containing only product-related inputs
+        $user_payload = [
+            'output_language' => ($ctx['output_language'] ?? 'en'),
+            'PRODUCT INFORMATION' => [
+                'product_name'      => $post->post_title,
+                'keywords'          => $ctx['keywords'],
+                'keywords_detailed' => $ctx['keywords_detailed'],
+                'faq'               => $ctx['faq'],
+            ]
         ];
-        $lines = [];
-        $lines[] = "Follow the instructions strictly below.";
-        $lines[] = "=== REQUIRED USER INPUTS (provided by system) ===";
-        $lines[] = wp_json_encode($user_inputs, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
-        $lines[] = "=== INSTRUCTIONS ===";
-        $lines[] = trim($gen);
+        self::log($run_id, 'User payload: output_language=' . ($ctx['output_language'] ?? 'en'));
 
+        // Legacy array kept (not used in payload directly)
         $content = [
-            ['type'=>'text', 'text'=> implode("\n\n", $lines)]
+            ['type'=>'text', 'text'=> wp_json_encode($user_payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)]
         ];
         // Replace localhost images with a test image URL when developing locally
         $test_img = 'https://shop.dreamli.nl/wp-content/uploads/2025/10/1642280007130.jpg';
@@ -618,8 +609,8 @@ final class DS_AI_Product_SEO {
         $include_csv    = (string)get_option(self::OPT_INCLUDE_FIELDS,'reasoning.encrypted_content,web_search_call.action.sources');
         $include_fields = array_values(array_filter(array_map('trim', explode(',', $include_csv))));
 
-        // Compose input blocks (text + images)
-        $full_text = implode("\n\n", $lines) . "\n\n" . $inst;
+        // Compose input blocks (text + images) — user message contains ONLY product data JSON (no long instructions)
+        $full_text = wp_json_encode($user_payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
         $content_blocks = [ ['type'=>'input_text', 'text'=> $full_text] ];
         // Use dev-substituted list to avoid localhost images in payload
         foreach ($img_urls_for_payload as $u) { $content_blocks[] = ['type'=>'input_image','image_url'=>$u]; }
@@ -652,9 +643,9 @@ final class DS_AI_Product_SEO {
             self::log($run_id, 'Responses payload (prompt mode) with constructed input blocks (images+keywords).');
         } else {
             $payload['model'] = $model;
-            $payload['instructions'] = $system;
+            $payload['instructions'] = trim($system) . "\n\n" . trim($gen);
             $payload['input'] = $input;
-            self::log($run_id, 'Responses payload (model mode) with constructed input blocks.');
+            self::log($run_id, 'Responses payload (model mode) with constructed input blocks (compact user payload).');
         }
 
         $t0 = microtime(true);
@@ -958,6 +949,14 @@ final class DS_AI_Product_SEO {
             $language = (string) pll_get_post_language($post_id);
         }
         if ($language===''){ $language = get_locale(); $language = is_string($language) ? substr($language,0,12) : ''; }
+        
+        // Normalize to two-letter lower-case for output language used by the model
+        $out_lang = '';
+        if (is_string($language) && $language!=='') {
+            // If locale like en_US or nl_NL, take first two letters
+            $out_lang = strtolower(substr($language, 0, 2));
+        }
+        if ($out_lang==='') { $out_lang = 'en'; }
 
         $keywords_detailed = [];
         $keywords_csv      = $legacy_keywords_csv;
@@ -1141,6 +1140,7 @@ final class DS_AI_Product_SEO {
             'story'            => $story,
             'has_images'       => !empty($img_urls),
             'img_urls'         => $img_urls,
+            'output_language'  => $out_lang,
         ];
     }
 
@@ -1497,27 +1497,17 @@ final class DS_AI_Product_SEO {
         $system = (string) get_option(self::OPT_SYSTEM_PROMPT, "You are an SEO copywriter...");
         $gen    = (string) get_option(self::OPT_PROMPT_GENERATE, self::default_generate_instructions());
 
-        $user_inputs = [
-            "PRODUCT INFORMATION" => [
-                "product_name"       => $post->post_title,
-                "product_category"   => $ctx['primary_cat_name'],
-                "keywords"           => $ctx['keywords'],
-                "keywords_detailed"  => $ctx['keywords_detailed'],
-                "faq"                => $ctx['faq'],
-                "note"               => "Images attached below. Analysis allowed."
-            ],
-            "INTERNAL LINKS (Optional)" => [
-                "category_url" => $ctx['category_url'] ?? ''
-            ],
-            "EXTERNAL LINK (Optional)" => $ctx['external_link'],
-            "USER EXPERIENCE INPUT (Optional)" => $ctx['story'] ?: ''
+        // Compact user payload containing only product-related inputs
+        $user_payload = [
+            'output_language' => ($ctx['output_language'] ?? 'en'),
+            'PRODUCT INFORMATION' => [
+                'product_name'      => $post->post_title,
+                'keywords'          => $ctx['keywords'],
+                'keywords_detailed' => $ctx['keywords_detailed'],
+                'faq'               => $ctx['faq'],
+            ]
         ];
-        $lines = [];
-        $lines[] = "Follow the instructions strictly below.";
-        $lines[] = "=== REQUIRED USER INPUTS (provided by system) ===";
-        $lines[] = wp_json_encode($user_inputs, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
-        $lines[] = "=== INSTRUCTIONS ===";
-        $lines[] = trim($gen);
+        self::log($run_id, 'User payload: output_language=' . ($ctx['output_language'] ?? 'en'));
 
         // Dev image substitution (reuse logic from worker)
         $test_img = 'https://shop.dreamli.nl/wp-content/uploads/2025/10/1642280007130.jpg';
@@ -1558,7 +1548,8 @@ final class DS_AI_Product_SEO {
         $enable_web     = (string)get_option(self::OPT_ENABLE_WEB_SEARCH,'yes') === 'yes';
         $search_size    = (string)get_option(self::OPT_SEARCH_CONTEXT,'medium');
 
-        $full_text = implode("\n\n", $lines) . "\n\n" . $inst;
+        // Compose input blocks with ONLY product data JSON (no long instructions).
+        $full_text = wp_json_encode($user_payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
         $content_blocks = [ ['type'=>'input_text','text'=>$full_text] ];
         foreach ($img_urls_for_payload as $u) { $content_blocks[] = ['type'=>'input_image','image_url'=>$u]; }
         $img_count = count($img_urls_for_payload); $img_preview = array_slice($img_urls_for_payload,0,2);
