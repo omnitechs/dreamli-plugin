@@ -1008,23 +1008,57 @@ final class DS_AI_Product_SEO {
                     return $ok_intent && $ok_vol;
                 }));
 
-                // Fallbacks if needed
-                $pool = $preferred;
-                if (empty($pool)){
-                    // Allow preferred intents regardless of min volume
-                    $pool = array_values(array_filter($cand, function($it) use ($accept_lc){ return in_array((string)$it['intent'], $accept_lc, true); }));
-                }
-                if (empty($pool)){
-                    // Allow any intent with min volume
-                    $pool = array_values(array_filter($cand, function($it) use ($kw_min_vol){ return !is_null($it['volume']) && (int)$it['volume'] >= $kw_min_vol; }));
-                }
-                if (empty($pool)){
-                    // Any remaining
-                    $pool = $cand;
+                // Build additional groups to top-up to kw_max when intents are sparse or missing.
+                $preferred_anyvol = array_values(array_filter($cand, function($it) use ($accept_lc){
+                    return in_array((string)$it['intent'], $accept_lc, true);
+                }));
+                $any_intent_minvol = array_values(array_filter($cand, function($it) use ($kw_min_vol){
+                    return !is_null($it['volume']) && (int)$it['volume'] >= $kw_min_vol;
+                }));
+                $all_candidates = $cand;
+
+                // Helper: unique-merge groups in priority order until we have >= kw_max
+                $by_key = [];
+                $merged = [];
+
+                $add_group = function(array $group) use (&$by_key, &$merged){
+                    foreach ($group as $it){
+                        $k = strtolower((string)$it['keyword']);
+                        if ($k === '') continue;
+                        if (!isset($by_key[$k])){ $by_key[$k] = true; $merged[] = $it; }
+                    }
+                };
+
+                // Start with strict preferred
+                $add_group($preferred);
+
+                // If less than kw_max, top-up with preferred regardless of volume
+                if (count($merged) < $kw_max){
+                    // remove already included
+                    $add_group(array_values(array_filter($preferred_anyvol, function($it) use ($by_key){
+                        $k = strtolower((string)$it['keyword']);
+                        return $k !== '' && !isset($by_key[$k]);
+                    })));
                 }
 
-                // Sort final pool
-                usort($pool, function($a,$b){
+                // If still less than kw_max, top-up with any intent but min volume
+                if (count($merged) < $kw_max){
+                    $add_group(array_values(array_filter($any_intent_minvol, function($it) use ($by_key){
+                        $k = strtolower((string)$it['keyword']);
+                        return $k !== '' && !isset($by_key[$k]);
+                    })));
+                }
+
+                // If still less than kw_max, add the rest
+                if (count($merged) < $kw_max){
+                    $add_group(array_values(array_filter($all_candidates, function($it) use ($by_key){
+                        $k = strtolower((string)$it['keyword']);
+                        return $k !== '' && !isset($by_key[$k]);
+                    })));
+                }
+
+                // Sort final merged list and slice to kw_max
+                usort($merged, function($a,$b){
                     $va = is_null($a['volume'])? -1 : (int)$a['volume'];
                     $vb = is_null($b['volume'])? -1 : (int)$b['volume'];
                     if ($va!==$vb) return $vb <=> $va;
@@ -1034,7 +1068,7 @@ final class DS_AI_Product_SEO {
                     return strcmp($a['keyword'],$b['keyword']);
                 });
 
-                $keywords_detailed = array_slice($pool, 0, $kw_max);
+                $keywords_detailed = array_slice($merged, 0, $kw_max);
                 if (!empty($keywords_detailed)){
                     $keywords_csv = implode(', ', array_map(function($it){ return $it['keyword']; }, $keywords_detailed));
                 }
