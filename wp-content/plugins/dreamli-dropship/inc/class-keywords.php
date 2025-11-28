@@ -18,6 +18,7 @@ final class DS_Keywords {
     // Action Scheduler hooks
     const AS_REFRESH   = 'ds_keywords_refresh_as';
     const AS_POLL      = 'ds_keywords_poll_as';
+    const AS_REPORT    = 'ds_keywords_daily_report';
 
     // Options
     const OPT_LOGIN  = 'ds_dfs_login';
@@ -62,9 +63,14 @@ final class DS_Keywords {
         if (function_exists('as_schedule_recurring_action')) {
             add_action(self::AS_REFRESH, [__CLASS__,'cron_refresh']);
             add_action(self::AS_POLL,    [__CLASS__,'cron_poll']);
+            add_action(self::AS_REPORT,  [__CLASS__,'run_daily_diagnostics']);
             add_action('action_scheduler_init', [__CLASS__, 'schedule_as_events'], 20);
             add_action('init', [__CLASS__, 'schedule_as_events'], 20);
+            // Ensure single scheduler if AS is present
+            add_action('action_scheduler_init', [__CLASS__, 'ensure_single_scheduler'], 5);
         }
+        // Ensure single scheduler at early init too
+        add_action('init', [__CLASS__, 'ensure_single_scheduler'], 5);
 
         // Ensure polling is scheduled (every 5 min) when Action Scheduler is not available
         if (!function_exists('as_schedule_recurring_action')) {
@@ -968,66 +974,73 @@ final class DS_Keywords {
     }
 
     public static function cron_poll(){
-        $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_poll: missing auth'); return; }
-        // Throttle polling to reduce API GETs (free but noisy); user can set to ~10h
-        $limits = self::get_limits();
-        $min_minutes = max(0, (int)($limits['poll_min_interval_minutes'] ?? 0));
-        if ($min_minutes > 0){
-            $last = (int) get_option('ds_kw_last_poll_unix', 0);
-            $nowu = time();
-            if ($last > 0 && ($nowu - $last) < ($min_minutes * 60)){
-                self::log_write('info','cron_poll: skip (throttled)', ['action'=>'cron_poll','message'=>'poll_skip (throttled)','response'=>['since_sec'=>$nowu-$last,'min_interval_min'=>$min_minutes]]);
-                return;
+        // Prevent overlapping poll runs
+        $lock_key = 'ds_kw_poll_lock';
+        if (get_transient($lock_key)) { self::log_write('info','cron_poll: skip (locked)', ['action'=>'cron_poll']); return; }
+        set_transient($lock_key, 1, 60);
+        try {
+            $auth = self::get_auth(); if (!$auth){ self::log_write('warn','cron_poll: missing auth'); return; }
+            // Throttle polling to reduce API GETs (free but noisy); user can set to ~10h
+            $limits = self::get_limits();
+            $min_minutes = max(0, (int)($limits['poll_min_interval_minutes'] ?? 0));
+            if ($min_minutes > 0){
+                $last = (int) get_option('ds_kw_last_poll_unix', 0);
+                $nowu = time();
+                if ($last > 0 && ($nowu - $last) < ($min_minutes * 60)){
+                    self::log_write('info','cron_poll: skip (throttled)', ['action'=>'cron_poll','message'=>'poll_skip (throttled)','response'=>['since_sec'=>$nowu-$last,'min_interval_min'=>$min_minutes]]);
+                    return;
+                }
+                update_option('ds_kw_last_poll_unix', $nowu);
             }
-            update_option('ds_kw_last_poll_unix', $nowu);
-        }
-        self::log_write('info','cron_poll: start', ['action'=>'cron_poll']);
-        // Forecasts (optional)
-        $should_poll_forecast = !empty($limits['forecast_enable']);
-        $ideas_mode = self::get_mode('ideas_mode');
-        $related_mode = self::get_mode('related_mode');
-        $volume_mode = self::get_mode('volume_mode');
-        $forecast_mode = self::get_mode('forecast_mode');
-        $paa_mode = self::get_mode('paa_mode');
+            self::log_write('info','cron_poll: start', ['action'=>'cron_poll']);
+            // Forecasts (optional)
+            $should_poll_forecast = !empty($limits['forecast_enable']);
+            $ideas_mode = self::get_mode('ideas_mode');
+            $related_mode = self::get_mode('related_mode');
+            $volume_mode = self::get_mode('volume_mode');
+            $forecast_mode = self::get_mode('forecast_mode');
+            $paa_mode = self::get_mode('paa_mode');
 
-        // Helper to decide polling per endpoint: skip in live mode if no posted tasks exist
-        $maybe_poll = function($endpoint_base) use ($auth){ return true; };
-
-        // Ideas
-        if (!($ideas_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/keywords_for_keywords'))){
-            self::poll_endpoint_ready('keywords_data/google_ads/keywords_for_keywords', $auth, function($result){ self::handle_ideas_result($result); });
-        } else {
-            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','action'=>'poll_skip']);
-        }
-        // Related expansion (Labs has no reliable tasks_ready; fallback will hit task_get by IDs). Skip if live and nothing posted.
-        if (!($related_mode === 'live' && !self::queue_has_posted('dataforseo_labs/google/related_keywords'))){
-            self::poll_endpoint_ready('dataforseo_labs/google/related_keywords', $auth, function($result){ self::handle_related_result($result); });
-        } else {
-            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'poll_skip']);
-        }
-        // Volume
-        if (!($volume_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/search_volume'))){
-            self::poll_endpoint_ready('keywords_data/google_ads/search_volume', $auth, function($result){ self::handle_volume_result($result); });
-        } else {
-            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'poll_skip']);
-        }
-        // PAA via SERP Organic (Advanced). If paa_mode is live (not implemented), skip polling unless posted.
-        if (!($paa_mode === 'live' && !self::queue_has_posted('serp/google/organic'))){
-            self::poll_endpoint_ready('serp/google/organic', $auth, function($result){ self::handle_paa_result($result); });
-        } else {
-            self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'serp/google/organic','action'=>'poll_skip']);
-        }
-        // Forecasts (optional)
-        if ($should_poll_forecast){
-            if (!($forecast_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/ad_traffic_by_keywords'))){
-                self::poll_endpoint_ready('keywords_data/google_ads/ad_traffic_by_keywords', $auth, function($result){ self::handle_forecast_result($result); });
+            // Ideas
+            if (!($ideas_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/keywords_for_keywords'))){
+                self::poll_endpoint_ready('keywords_data/google_ads/keywords_for_keywords', $auth, function($result){ self::handle_ideas_result($result); });
             } else {
-                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/ad_traffic_by_keywords','action'=>'poll_skip']);
+                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/keywords_for_keywords','action'=>'poll_skip']);
             }
+            // Related (Labs live-only effectively)
+            if (!($related_mode === 'live' && !self::queue_has_posted('dataforseo_labs/google/related_keywords'))){
+                self::poll_endpoint_ready('dataforseo_labs/google/related_keywords', $auth, function($result){ self::handle_related_result($result); });
+            } else {
+                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'dataforseo_labs/google/related_keywords','action'=>'poll_skip']);
+            }
+            // Volume
+            if (!($volume_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/search_volume'))){
+                self::poll_endpoint_ready('keywords_data/google_ads/search_volume', $auth, function($result){ self::handle_volume_result($result); });
+            } else {
+                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/search_volume','action'=>'poll_skip']);
+            }
+            // PAA
+            if (!($paa_mode === 'live' && !self::queue_has_posted('serp/google/organic'))){
+                self::poll_endpoint_ready('serp/google/organic', $auth, function($result){ self::handle_paa_result($result); });
+            } else {
+                self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'serp/google/organic','action'=>'poll_skip']);
+            }
+            // Forecasts (optional)
+            if ($should_poll_forecast){
+                if (!($forecast_mode === 'live' && !self::queue_has_posted('keywords_data/google_ads/ad_traffic_by_keywords'))){
+                    self::poll_endpoint_ready('keywords_data/google_ads/ad_traffic_by_keywords', $auth, function($result){ self::handle_forecast_result($result); });
+                } else {
+                    self::log_write('info','poll_skip (live mode, no posted tasks)', ['endpoint'=>'keywords_data/google_ads/ad_traffic_by_keywords','action'=>'poll_skip']);
+                }
+            }
+            // Flush any aggregated batches now
+            self::agg_flush_all($auth);
+            self::log_write('info','cron_poll: done', ['action'=>'cron_poll']);
+        } catch (\Throwable $e) {
+            self::log_write('error','cron_poll crashed', ['endpoint'=>'ds-pipeline','action'=>'poll:crash','error'=>$e->getMessage()]);
+        } finally {
+            delete_transient($lock_key);
         }
-        // Ensure any globally aggregated batches are flushed within this poll request
-        self::agg_flush_all($auth);
-        self::log_write('info','cron_poll: done', ['action'=>'cron_poll']);
     }
 
     // ----- Seeds -----
@@ -1781,27 +1794,42 @@ final class DS_Keywords {
                     self::log_write('info','related live summary', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds_posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
                 }
             } else {
-                $tasks=[]; $ctxs=[]; $max_batch=100;
-                foreach ($to_expand as $kw){
-                    $payload_task = [
-                        'keyword' => $kw,
-                        'language_code' => $lang_code,
-                        'location_code' => $loc_code,
-                        'limit' => 100
-                    ];
-                    // Try reuse from logs to avoid posting duplicate async related tasks
-                    $reuse_saved = self::reuse_related_from_logs($payload_task, $term_id, $lang);
-                    if ($reuse_saved > 0){
-                        self::log_write('info','related async reuse hit', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'reuse','term_id'=>$term_id,'lang'=>$lang,'response'=>['items'=>$reuse_saved]]);
-                        continue;
+                // Fallback: Labs Related has no async; treat as live even if mode != 'live'
+                $saved_total = 0; $posted = 0; $errors = 0;
+                if (self::agg_enabled()){
+                    foreach ($to_expand as $kw){
+                        $payload_item = [ 'keyword'=>$kw, 'language_code'=>$lang_code, 'location_code'=>$loc_code, 'limit'=>$rel_limit ];
+                        $reuse_saved = self::reuse_related_from_logs($payload_item, $term_id, $lang);
+                        if ($reuse_saved > 0){ $saved_total += $reuse_saved; $posted++; continue; }
+                        self::agg_add_related($payload_item, $term_id, $lang); $posted++;
                     }
-                    $tasks[] = $payload_task;
-                    $ctxs[] = ['endpoint'=>'dataforseo_labs/google/related_keywords','term_id'=>$term_id,'lang'=>$lang,'tag'=>'related:'.$term_id.':'.$lang];
-                    if (count($tasks) >= $max_batch){
-                        self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); $tasks=[]; $ctxs=[];
+                    // Flush immediately so this run proceeds without waiting for poll
+                    self::agg_flush_related($auth);
+                    self::log_write('info','related live summary (aggregated)', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds_buffered'=>$posted,'saved'=>$saved_total]]);
+                } else {
+                    // Immediate per-term live batch
+                    $batch=[]; $seeds_in_batch=0; $max_batch=100;
+                    foreach ($to_expand as $kw){
+                        $payload_item = [ 'keyword'=>$kw, 'language_code'=>$lang_code, 'location_code'=>$loc_code, 'limit'=>$rel_limit ];
+                        $reuse_saved = self::reuse_related_from_logs($payload_item, $term_id, $lang);
+                        if ($reuse_saved > 0){ $saved_total += $reuse_saved; $posted++; continue; }
+                        $batch[]=$payload_item; $seeds_in_batch++; $posted++;
+                        if (count($batch) >= $max_batch){
+                            self::log_write('info','related live batch request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$batch]);
+                            list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $batch, $auth);
+                            if ($err || $code < 200 || $code >= 300){ $errors++; self::log_write('warn','related live batch failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang,'response'=>$json]); }
+                            else { $tasks_arr = is_array($json['tasks'] ?? null) ? $json['tasks'] : []; $nodes_total=0; $normalized_total=0; $saved_batch=0; foreach ($tasks_arr as $task){ $items=(isset($task['result'][0]['items'])&&is_array($task['result'][0]['items']))?$task['result'][0]['items']:[]; $nodes_total += is_array($items)?count($items):0; $norm=[]; foreach($items as $it){ if(isset($it['keyword_data'])){ $kd=$it['keyword_data']; $kw2=isset($kd['keyword'])?(string)$kd['keyword']:''; $info=(isset($kd['keyword_info'])&&is_array($kd['keyword_info']))?$kd['keyword_info']:[]; $norm[]=array_merge(['keyword'=>$kw2], $info);} elseif(isset($it['keyword'])){ $norm[]=$it; } } $normalized_total += count($norm); if(!empty($norm)){ $saved_now=self::save_related_items($norm,$term_id,$lang); $saved_batch += $saved_now; } } self::log_write('info','related live batch saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds'=>$seeds_in_batch,'nodes'=>$nodes_total,'normalized'=>$normalized_total,'items_saved'=>$saved_batch]]); $saved_total += $saved_batch; }
+                            $batch=[]; $seeds_in_batch=0;
+                        }
                     }
+                    if (!empty($batch)){
+                        self::log_write('info','related live batch request', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','term_id'=>$term_id,'lang'=>$lang,'request'=>$batch]);
+                        list($json,$code,$err) = self::dfs_post('dataforseo_labs/google/related_keywords/live', $batch, $auth);
+                        if ($err || $code < 200 || $code >= 300){ $errors++; self::log_write('warn','related live batch failed', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'live','http_code'=>$code,'error'=>$err,'term_id'=>$term_id,'lang'=>$lang,'response'=>$json]); }
+                        else { $tasks_arr = is_array($json['tasks'] ?? null) ? $json['tasks'] : []; $nodes_total=0; $normalized_total=0; $saved_batch=0; foreach ($tasks_arr as $task){ $items=(isset($task['result'][0]['items'])&&is_array($task['result'][0]['items']))?$task['result'][0]['items']:[]; $nodes_total += is_array($items)?count($items):0; $norm=[]; foreach($items as $it){ if(isset($it['keyword_data'])){ $kd=$it['keyword_data']; $kw2=isset($kd['keyword'])?(string)$kd['keyword']:''; $info=(isset($kd['keyword_info'])&&is_array($kd['keyword_info']))?$kd['keyword_info']:[]; $norm[]=array_merge(['keyword'=>$kw2], $info);} elseif(isset($it['keyword'])){ $norm[]=$it; } } $normalized_total += count($norm); if(!empty($norm)){ $saved_now=self::save_related_items($norm,$term_id,$lang); $saved_batch += $saved_now; } } self::log_write('info','related live batch saved', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'handle_result','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds'=>$seeds_in_batch,'nodes'=>$nodes_total,'normalized'=>$normalized_total,'items_saved'=>$saved_batch]]); $saved_total += $saved_batch; }
+                    }
+                    self::log_write('info','related live summary', ['endpoint'=>'dataforseo_labs/google/related_keywords/live','action'=>'summary','term_id'=>$term_id,'lang'=>$lang,'response'=>['seeds_posted'=>$posted,'saved'=>$saved_total,'errors'=>$errors]]);
                 }
-                if ($tasks){ self::dfs_post_tasks('dataforseo_labs/google/related_keywords/task_post', $tasks, $ctxs, $auth); }
             }
         }
 
@@ -1933,6 +1961,8 @@ final class DS_Keywords {
 
         // ---- Smart Fill (optional, top-up until target) ----
         self::smart_fill_term_lang($term_id, $lang, $auth, $limits, $lang_code, $loc_code, $seed_tokens);
+        // Proactive flush so aggregated posts happen within this request too
+        if (self::agg_enabled()) { self::agg_flush_all($auth); }
     }
 
     private static function smart_fill_term_lang($term_id, $lang, $auth, $limits, $lang_code, $loc_code, $seed_tokens){
@@ -2211,6 +2241,13 @@ final class DS_Keywords {
         if (!as_next_scheduled_action(self::AS_POLL, [], 'ds-keywords')) {
             as_schedule_recurring_action(time()+300, 5*MINUTE_IN_SECONDS, self::AS_POLL, [], 'ds-keywords');
         }
+        // Schedule daily diagnostics report (run ~08:00 site time)
+        if (!as_next_scheduled_action(self::AS_REPORT, [], 'ds-keywords')) {
+            $tz_offset = (int) (get_option('gmt_offset', 0) * HOUR_IN_SECONDS);
+            $eight_am  = strtotime('tomorrow 08:00:00') - DAY_IN_SECONDS; // today 08:00 approx
+            $start     = max(time()+600, $eight_am + $tz_offset);
+            as_schedule_recurring_action($start, DAY_IN_SECONDS, self::AS_REPORT, [], 'ds-keywords');
+        }
         // Clear WP-Cron duplicates if any
         if (function_exists('wp_next_scheduled')) {
             if (wp_next_scheduled(self::CRON_REFRESH)) { wp_clear_scheduled_hook(self::CRON_REFRESH); }
@@ -2389,5 +2426,325 @@ final class DS_Keywords {
         // Re-evaluate gate for this term/lang
         self::maybe_trigger_followups((int)$term_id, (string)$lang, true);
     }
+
+    // ----- Scheduler self-healing -----
+    public static function ensure_single_scheduler(){
+        // If Action Scheduler exists, unschedule WP‑Cron duplicates for our hooks
+        if (function_exists('as_schedule_recurring_action')){
+            $hooks = [ self::CRON_REFRESH, self::CRON_POLL ];
+            foreach ($hooks as $hook){
+                while ($ts = wp_next_scheduled($hook)){
+                    wp_unschedule_event($ts, $hook);
+                }
+            }
+        }
+    }
+
+    // ----- Daily diagnostics & report -----
+    public static function run_daily_diagnostics(){
+        $report = self::build_diagnostics_report();
+        // Email admin
+        $to = get_option('admin_email');
+        if ($to){
+            $subject = 'Dreamli Keywords — Daily Report';
+            $body = self::format_report_text($report);
+            @wp_mail($to, $subject, $body);
+        }
+        // Log snapshot for UI/history
+        self::log_write('info','daily report', ['endpoint'=>'ds-daily-report','action'=>'report:daily','response'=>$report]);
+        // Optional conservative auto‑fixes
+        self::autofix_issues($report);
+    }
+
+    private static function build_diagnostics_report(){
+        return [
+            'time'        => current_time('mysql'),
+            'limits'      => self::get_limits(),
+            'schedulers'  => self::detect_schedulers(),
+            'endpoints'   => self::endpoint_metrics_last_24h(),
+            'queue'       => self::queue_snapshot(),
+            'coverage'    => self::coverage_by_language(),
+            'bottlenecks' => [] // filled below
+        ];
+    }
+
+    private static function detect_schedulers(){
+        $has_as = function_exists('as_schedule_recurring_action');
+        $wp_poll = wp_next_scheduled(self::CRON_POLL) ? true : false;
+        $wp_refresh = wp_next_scheduled(self::CRON_REFRESH) ? true : false;
+        return [ 'action_scheduler'=>$has_as, 'wp_cron_poll'=>$wp_poll, 'wp_cron_refresh'=>$wp_refresh ];
+    }
+
+    private static function queue_snapshot(){
+        global $wpdb; $tq = self::table_queue();
+        $rows = $wpdb->get_results("SELECT endpoint, status, COUNT(*) cnt FROM {$tq} GROUP BY endpoint, status", ARRAY_A);
+        $old = $wpdb->get_results("SELECT endpoint, COUNT(*) cnt FROM {$tq} WHERE status='posted' AND created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR) GROUP BY endpoint", ARRAY_A);
+        return [ 'by_status'=>$rows, 'stale_posted_over_2h'=>$old ];
+    }
+
+    private static function coverage_by_language(){
+        global $wpdb; $tk = self::table_keywords(); $tf = self::table_faq();
+        $kw = $wpdb->get_results("SELECT lang, COUNT(*) cnt, SUM(CASE WHEN COALESCE(intent_main,'')<>'' THEN 1 ELSE 0 END) intent_cnt FROM {$tk} GROUP BY lang", ARRAY_A);
+        $faq = $wpdb->get_results("SELECT lang, COUNT(*) cnt FROM {$tf} GROUP BY lang", ARRAY_A);
+        $faq_map = [];
+        foreach ($faq as $r){ $faq_map[$r['lang']] = (int)$r['cnt']; }
+        $out = [];
+        foreach ($kw as $r){
+            $lang = (string)$r['lang'];
+            $total = (int)$r['cnt'];
+            $intent = (int)$r['intent_cnt'];
+            $cov = $total>0 ? round(100.0*$intent/$total,1) : 0.0;
+            $out[] = [ 'lang'=>$lang, 'keywords'=>$total, 'intent_covered_pct'=>$cov, 'faq'=> (int)($faq_map[$lang] ?? 0) ];
+        }
+        return $out;
+    }
+
+    private static function endpoint_metrics_last_24h(){
+        global $wpdb; $tl = self::table_logs();
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT endpoint, action, level, COUNT(*) cnt FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d HOUR) GROUP BY endpoint, action, level",
+            24
+        ), ARRAY_A);
+        // Summaries per endpoint
+        $by = [];
+        foreach ($rows as $r){
+            $ep = (string)$r['endpoint']; $ac = (string)$r['action']; $lv = (string)$r['level']; $cnt=(int)$r['cnt'];
+            if (!isset($by[$ep])) $by[$ep] = [ 'post_tasks'=>0, 'handle_result'=>0, 'requests'=>0, 'responses'=>0, 'warn'=>0, 'error'=>0 ];
+            if ($ac==='post_tasks') $by[$ep]['post_tasks'] += $cnt;
+            if ($ac==='handle_result') $by[$ep]['handle_result'] += $cnt;
+            if ($ac==='request') $by[$ep]['requests'] += $cnt;
+            if ($ac==='response') $by[$ep]['responses'] += $cnt;
+            if ($lv==='warn') $by[$ep]['warn'] += $cnt;
+            if ($lv==='error') $by[$ep]['error'] += $cnt;
+        }
+        // Add poll skips vs starts
+        $poll = $wpdb->get_results($wpdb->prepare("SELECT action, COUNT(*) cnt FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d HOUR) AND action IN ('cron_poll','poll_skip') GROUP BY action",24), ARRAY_A);
+        $poll_map = []; foreach ($poll as $r){ $poll_map[$r['action']] = (int)$r['cnt']; }
+        $by['ds-poll'] = [ 'starts'=> ($poll_map['cron_poll'] ?? 0), 'skips'=> ($poll_map['poll_skip'] ?? 0) ];
+        return $by;
+    }
+
+    private static function detect_bottlenecks($report){
+        $issues = [];
+        // Duplicate schedulers
+        if (!empty($report['schedulers']['action_scheduler']) && (!empty($report['schedulers']['wp_cron_poll']) || !empty($report['schedulers']['wp_cron_refresh']))){
+            $issues[] = ['code'=>'duplicate_schedulers','severity'=>'warn','msg'=>'Both Action Scheduler and WP‑Cron are scheduled for ds_keywords_*; keep only AS to avoid duplicate pollers.','suggest'=>'Auto‑removed WP‑Cron duplicates'];
+        }
+        // Related async 404s
+        global $wpdb; $tl = self::table_logs();
+        $count404 = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 48 HOUR) AND endpoint='dataforseo_labs/google/related_keywords/task_post' AND http_code=404");
+        if ($count404>0){ $issues[] = ['code'=>'labs_related_async_404','severity'=>'info','msg'=>'Labs Related async task_post returned 404 recently; Labs is live‑only.','suggest'=>'Force related_mode=live (autofix)']; }
+        // Queue backlog (>2h posted)
+        $stale_total = 0; foreach (($report['queue']['stale_posted_over_2h'] ?? []) as $r){ $stale_total += (int)$r['cnt']; }
+        if ($stale_total>0){ $issues[] = ['code'=>'queue_backlog','severity'=>'warn','msg'=>'There are queued tasks posted >2h ago.','suggest'=>'Lower poll_min_interval temporarily or run poll now.']; }
+        // High poll skip rate
+        $skips = (int)($report['endpoints']['ds-poll']['skips'] ?? 0); $starts = (int)($report['endpoints']['ds-poll']['starts'] ?? 0);
+        if ($skips > 3*$starts){ $issues[] = ['code'=>'poll_throttled','severity'=>'info','msg'=>'Polling is highly throttled (many skips vs starts).','suggest'=>'Reduce poll_min_interval_minutes for faster ingestion']; }
+        return $issues;
+    }
+
+    private static function format_report_text($r){
+        $lines = [];
+        $lines[] = 'Time: '.$r['time'];
+        $lines[] = '';
+        $lines[] = 'Schedulers: AS='.( $r['schedulers']['action_scheduler']?'yes':'no' ).', WP‑Cron poll='.( $r['schedulers']['wp_cron_poll']?'yes':'no' ).', WP‑Cron refresh='.( $r['schedulers']['wp_cron_refresh']?'yes':'no' );
+        $lines[] = '';
+        $lines[] = 'Endpoints (last 24h):';
+        foreach ($r['endpoints'] as $ep=>$m){
+            if ($ep==='ds-poll') continue;
+            $lines[] = sprintf(' - %s: post=%d, ingested=%d, warn=%d, error=%d', $ep, (int)($m['post_tasks']??0), (int)($m['handle_result']??0), (int)($m['warn']??0), (int)($m['error']??0));
+        }
+        if (isset($r['endpoints']['ds-poll'])){
+            $lines[] = sprintf('Poller: starts=%d, skips=%d', (int)$r['endpoints']['ds-poll']['starts'], (int)$r['endpoints']['ds-poll']['skips']);
+        }
+        $lines[] = '';
+        $lines[] = 'Coverage by language:';
+        foreach ($r['coverage'] as $row){ $lines[] = sprintf(' - %s: %d keywords, intent %0.1f%%, %d FAQ', $row['lang'], $row['keywords'], $row['intent_covered_pct'], $row['faq']); }
+        $r['bottlenecks'] = self::detect_bottlenecks($r);
+        if (!empty($r['bottlenecks'])){
+            $lines[] = '';
+            $lines[] = 'Bottlenecks:';
+            foreach ($r['bottlenecks'] as $b){ $lines[] = sprintf(' - [%s] %s (%s). Suggestion: %s', strtoupper($b['severity']), $b['code'], $b['msg'], $b['suggest']); }
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function autofix_issues($report){
+        // Always ensure single scheduler
+        self::ensure_single_scheduler();
+        // If Labs Related async 404 occurred, force related_mode to live
+        $issues = self::detect_bottlenecks($report);
+        $has404 = false; foreach ($issues as $b){ if ($b['code']==='labs_related_async_404'){ $has404=true; break; } }
+        if ($has404){
+            $raw = get_option(self::OPT_LIMITS,''); $limits = json_decode($raw, true); if (!is_array($limits)) $limits=[];
+            if (!isset($limits['related_mode']) || strtolower((string)$limits['related_mode'])!=='live'){
+                $limits['related_mode'] = 'live';
+                update_option(self::OPT_LIMITS, wp_json_encode($limits));
+                self::log_write('info','autofix: set related_mode=live', ['endpoint'=>'ds-autofix','action'=>'related_mode_live']);
+            }
+        }
+        // For heavy queue backlog + very high poll throttle, only suggest (do not auto change limits)
+        // Actions taken are logged above.
+    }
 }
 
+
+    // ----- Scheduler self-healing -----
+    public static function ensure_single_scheduler(){
+        // If Action Scheduler exists, unschedule WP‑Cron duplicates for our hooks
+        if (function_exists('as_schedule_recurring_action')){
+            $hooks = [ self::CRON_REFRESH, self::CRON_POLL ];
+            foreach ($hooks as $hook){
+                while ($ts = wp_next_scheduled($hook)){
+                    wp_unschedule_event($ts, $hook);
+                }
+            }
+        }
+    }
+
+    // ----- Daily diagnostics & report -----
+    public static function run_daily_diagnostics(){
+        $report = self::build_diagnostics_report();
+        // Email admin
+        $to = get_option('admin_email');
+        if ($to){
+            $subject = 'Dreamli Keywords — Daily Report';
+            $body = self::format_report_text($report);
+            @wp_mail($to, $subject, $body);
+        }
+        // Log snapshot for UI/history
+        self::log_write('info','daily report', ['endpoint'=>'ds-daily-report','action'=>'report:daily','response'=>$report]);
+        // Optional conservative auto‑fixes
+        self::autofix_issues($report);
+    }
+
+    private static function build_diagnostics_report(){
+        return [
+            'time'        => current_time('mysql'),
+            'limits'      => self::get_limits(),
+            'schedulers'  => self::detect_schedulers(),
+            'endpoints'   => self::endpoint_metrics_last_24h(),
+            'queue'       => self::queue_snapshot(),
+            'coverage'    => self::coverage_by_language(),
+            'bottlenecks' => [] // filled below
+        ];
+    }
+
+    private static function detect_schedulers(){
+        $has_as = function_exists('as_schedule_recurring_action');
+        $wp_poll = wp_next_scheduled(self::CRON_POLL) ? true : false;
+        $wp_refresh = wp_next_scheduled(self::CRON_REFRESH) ? true : false;
+        return [ 'action_scheduler'=>$has_as, 'wp_cron_poll'=>$wp_poll, 'wp_cron_refresh'=>$wp_refresh ];
+    }
+
+    private static function queue_snapshot(){
+        global $wpdb; $tq = self::table_queue();
+        $rows = $wpdb->get_results("SELECT endpoint, status, COUNT(*) cnt FROM {$tq} GROUP BY endpoint, status", ARRAY_A);
+        $old = $wpdb->get_results("SELECT endpoint, COUNT(*) cnt FROM {$tq} WHERE status='posted' AND created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR) GROUP BY endpoint", ARRAY_A);
+        return [ 'by_status'=>$rows, 'stale_posted_over_2h'=>$old ];
+    }
+
+    private static function coverage_by_language(){
+        global $wpdb; $tk = self::table_keywords(); $tf = self::table_faq();
+        $kw = $wpdb->get_results("SELECT lang, COUNT(*) cnt, SUM(CASE WHEN COALESCE(intent_main,'')<>'' THEN 1 ELSE 0 END) intent_cnt FROM {$tk} GROUP BY lang", ARRAY_A);
+        $faq = $wpdb->get_results("SELECT lang, COUNT(*) cnt FROM {$tf} GROUP BY lang", ARRAY_A);
+        $faq_map = [];
+        foreach ($faq as $r){ $faq_map[$r['lang']] = (int)$r['cnt']; }
+        $out = [];
+        foreach ($kw as $r){
+            $lang = (string)$r['lang'];
+            $total = (int)$r['cnt'];
+            $intent = (int)$r['intent_cnt'];
+            $cov = $total>0 ? round(100.0*$intent/$total,1) : 0.0;
+            $out[] = [ 'lang'=>$lang, 'keywords'=>$total, 'intent_covered_pct'=>$cov, 'faq'=> (int)($faq_map[$lang] ?? 0) ];
+        }
+        return $out;
+    }
+
+    private static function endpoint_metrics_last_24h(){
+        global $wpdb; $tl = self::table_logs();
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT endpoint, action, level, COUNT(*) cnt FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d HOUR) GROUP BY endpoint, action, level",
+            24
+        ), ARRAY_A);
+        // Summaries per endpoint
+        $by = [];
+        foreach ($rows as $r){
+            $ep = (string)$r['endpoint']; $ac = (string)$r['action']; $lv = (string)$r['level']; $cnt=(int)$r['cnt'];
+            if (!isset($by[$ep])) $by[$ep] = [ 'post_tasks'=>0, 'handle_result'=>0, 'requests'=>0, 'responses'=>0, 'warn'=>0, 'error'=>0 ];
+            if ($ac==='post_tasks') $by[$ep]['post_tasks'] += $cnt;
+            if ($ac==='handle_result') $by[$ep]['handle_result'] += $cnt;
+            if ($ac==='request') $by[$ep]['requests'] += $cnt;
+            if ($ac==='response') $by[$ep]['responses'] += $cnt;
+            if ($lv==='warn') $by[$ep]['warn'] += $cnt;
+            if ($lv==='error') $by[$ep]['error'] += $cnt;
+        }
+        // Add poll skips vs starts
+        $poll = $wpdb->get_results($wpdb->prepare("SELECT action, COUNT(*) cnt FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d HOUR) AND action IN ('cron_poll','poll_skip') GROUP BY action",24), ARRAY_A);
+        $poll_map = []; foreach ($poll as $r){ $poll_map[$r['action']] = (int)$r['cnt']; }
+        $by['ds-poll'] = [ 'starts'=> ($poll_map['cron_poll'] ?? 0), 'skips'=> ($poll_map['poll_skip'] ?? 0) ];
+        return $by;
+    }
+
+    private static function detect_bottlenecks($report){
+        $issues = [];
+        // Duplicate schedulers
+        if (!empty($report['schedulers']['action_scheduler']) && (!empty($report['schedulers']['wp_cron_poll']) || !empty($report['schedulers']['wp_cron_refresh']))){
+            $issues[] = ['code'=>'duplicate_schedulers','severity'=>'warn','msg'=>'Both Action Scheduler and WP‑Cron are scheduled for ds_keywords_*; keep only AS to avoid duplicate pollers.','suggest'=>'Auto‑removed WP‑Cron duplicates'];
+        }
+        // Related async 404s
+        global $wpdb; $tl = self::table_logs();
+        $count404 = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$tl} WHERE ts >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 48 HOUR) AND endpoint='dataforseo_labs/google/related_keywords/task_post' AND http_code=404");
+        if ($count404>0){ $issues[] = ['code'=>'labs_related_async_404','severity'=>'info','msg'=>'Labs Related async task_post returned 404 recently; Labs is live‑only.','suggest'=>'Force related_mode=live (autofix)']; }
+        // Queue backlog (>2h posted)
+        $stale_total = 0; foreach (($report['queue']['stale_posted_over_2h'] ?? []) as $r){ $stale_total += (int)$r['cnt']; }
+        if ($stale_total>0){ $issues[] = ['code'=>'queue_backlog','severity'=>'warn','msg'=>'There are queued tasks posted >2h ago.','suggest'=>'Lower poll_min_interval temporarily or run poll now.']; }
+        // High poll skip rate
+        $skips = (int)($report['endpoints']['ds-poll']['skips'] ?? 0); $starts = (int)($report['endpoints']['ds-poll']['starts'] ?? 0);
+        if ($skips > 3*$starts){ $issues[] = ['code'=>'poll_throttled','severity'=>'info','msg'=>'Polling is highly throttled (many skips vs starts).','suggest'=>'Reduce poll_min_interval_minutes for faster ingestion']; }
+        return $issues;
+    }
+
+    private static function format_report_text($r){
+        $lines = [];
+        $lines[] = 'Time: '.$r['time'];
+        $lines[] = '';
+        $lines[] = 'Schedulers: AS='.( $r['schedulers']['action_scheduler']?'yes':'no' ).', WP‑Cron poll='.( $r['schedulers']['wp_cron_poll']?'yes':'no' ).', WP‑Cron refresh='.( $r['schedulers']['wp_cron_refresh']?'yes':'no' );
+        $lines[] = '';
+        $lines[] = 'Endpoints (last 24h):';
+        foreach ($r['endpoints'] as $ep=>$m){
+            if ($ep==='ds-poll') continue;
+            $lines[] = sprintf(' - %s: post=%d, ingested=%d, warn=%d, error=%d', $ep, (int)($m['post_tasks']??0), (int)($m['handle_result']??0), (int)($m['warn']??0), (int)($m['error']??0));
+        }
+        if (isset($r['endpoints']['ds-poll'])){
+            $lines[] = sprintf('Poller: starts=%d, skips=%d', (int)$r['endpoints']['ds-poll']['starts'], (int)$r['endpoints']['ds-poll']['skips']);
+        }
+        $lines[] = '';
+        $lines[] = 'Coverage by language:';
+        foreach ($r['coverage'] as $row){ $lines[] = sprintf(' - %s: %d keywords, intent %0.1f%%, %d FAQ', $row['lang'], $row['keywords'], $row['intent_covered_pct'], $row['faq']); }
+        $r['bottlenecks'] = self::detect_bottlenecks($r);
+        if (!empty($r['bottlenecks'])){
+            $lines[] = '';
+            $lines[] = 'Bottlenecks:';
+            foreach ($r['bottlenecks'] as $b){ $lines[] = sprintf(' - [%s] %s (%s). Suggestion: %s', strtoupper($b['severity']), $b['code'], $b['msg'], $b['suggest']); }
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function autofix_issues($report){
+        // Always ensure single scheduler
+        self::ensure_single_scheduler();
+        // If Labs Related async 404 occurred, force related_mode to live
+        $issues = self::detect_bottlenecks($report);
+        $has404 = false; foreach ($issues as $b){ if ($b['code']==='labs_related_async_404'){ $has404=true; break; } }
+        if ($has404){
+            $raw = get_option(self::OPT_LIMITS,''); $limits = json_decode($raw, true); if (!is_array($limits)) $limits=[];
+            if (!isset($limits['related_mode']) || strtolower((string)$limits['related_mode'])!=='live'){
+                $limits['related_mode'] = 'live';
+                update_option(self::OPT_LIMITS, wp_json_encode($limits));
+                self::log_write('info','autofix: set related_mode=live', ['endpoint'=>'ds-autofix','action'=>'related_mode_live']);
+            }
+        }
+        // For heavy queue backlog + very high poll throttle, only suggest (do not auto change limits)
+        // Actions taken are logged above.
+    }
