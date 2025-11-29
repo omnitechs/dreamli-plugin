@@ -19,6 +19,7 @@ final class DS_Keywords {
     const AS_REFRESH   = 'ds_keywords_refresh_as';
     const AS_POLL      = 'ds_keywords_poll_as';
     const AS_REPORT    = 'ds_keywords_daily_report';
+    const AS_TOPUP     = 'ds_keywords_topup_as';
 
     // Options
     const OPT_LOGIN  = 'ds_dfs_login';
@@ -64,6 +65,7 @@ final class DS_Keywords {
             add_action(self::AS_REFRESH, [__CLASS__,'cron_refresh']);
             add_action(self::AS_POLL,    [__CLASS__,'cron_poll']);
             add_action(self::AS_REPORT,  [__CLASS__,'run_daily_diagnostics']);
+            add_action(self::AS_TOPUP,   [__CLASS__,'as_topup_run']);
             add_action('action_scheduler_init', [__CLASS__, 'schedule_as_events'], 20);
             add_action('init', [__CLASS__, 'schedule_as_events'], 20);
             // Ensure single scheduler if AS is present
@@ -496,9 +498,10 @@ final class DS_Keywords {
             <hr>
             <h2>Manual run</h2>
             <p>
-                <?php $nonce_all = wp_create_nonce('ds_kw_refresh_all'); ?>
+                <?php $nonce_all = wp_create_nonce('ds_kw_refresh_all'); $nonce_top = wp_create_nonce('ds_kw_topup_now'); ?>
                 <a class="button button-primary" href="<?php echo esc_url( add_query_arg(['page'=>'ds-keywords','ds_kw_action'=>'refresh_all','mode'=>'stale','_wpnonce'=>$nonce_all], admin_url('admin.php')) ); ?>">Run now for all categories (only stale)</a>
                 <a class="button" style="margin-left:6px" href="<?php echo esc_url( add_query_arg(['page'=>'ds-keywords','ds_kw_action'=>'refresh_all','mode'=>'force','_wpnonce'=>$nonce_all], admin_url('admin.php')) ); ?>">Run now for all categories (force)</a>
+                <a class="button" style="margin-left:6px" href="<?php echo esc_url( add_query_arg(['page'=>'ds-keywords','ds_kw_action'=>'topup_now','_wpnonce'=>$nonce_top], admin_url('admin.php')) ); ?>">Top‑up under‑target now</a>
                 <a class="button" style="margin-left:6px" href="<?php echo esc_url( admin_url('admin.php?page=ds-keywords-logs') ); ?>">Open Logs</a>
             </p>
         </div>
@@ -634,6 +637,19 @@ final class DS_Keywords {
         if ($action === 'clear_logs'){
             check_admin_referer('ds_kw_clear_logs');
             global $wpdb; $t=self::table_logs(); $wpdb->query("TRUNCATE TABLE {$t}");
+            wp_safe_redirect(remove_query_arg(['ds_kw_action','_wpnonce']));
+            exit;
+        }
+
+        if ($action === 'topup_now'){
+            check_admin_referer('ds_kw_topup_now');
+            self::log_write('info','Admin: manual topup_now', ['endpoint'=>'ds-topup','action'=>'admin']);
+            if (function_exists('as_enqueue_async_action')){
+                as_enqueue_async_action(self::AS_TOPUP, [], 'ds-keywords');
+            } else {
+                // Fallback: run inline (may take time)
+                self::as_topup_run();
+            }
             wp_safe_redirect(remove_query_arg(['ds_kw_action','_wpnonce']));
             exit;
         }
@@ -2225,6 +2241,48 @@ final class DS_Keywords {
         if ($row){ $wpdb->update($tq, ['status'=>'completed','result_json'=>substr(wp_json_encode($result),0,20000),'updated_at'=>$now], ['id'=>(int)$row['id']]); }
     }
 
+    public static function as_topup_run(){
+        // Top‑Up driver: iterate under‑target term+lang and run follow‑ups + Smart Fill without re‑posting Ideas
+        $lock_key = 'ds_kw_topup_lock';
+        if (get_transient($lock_key)) { self::log_write('info','topup: skip (locked)', ['endpoint'=>'ds-topup','action'=>'skip']); return; }
+        set_transient($lock_key, 1, 300);
+        try {
+            $auth = self::get_auth(); if (!$auth){ self::log_write('warn','topup: missing auth', ['endpoint'=>'ds-topup','action'=>'start']); return; }
+            $limits = self::get_limits();
+            $target = max(1, (int)($limits['target_keywords_per_cat'] ?? 300));
+            $maxPairs = max(1, (int)($limits['max_cats_per_run'] ?? 50));
+            $langs = self::get_languages();
+            $terms = get_terms(['taxonomy'=>'product_cat','hide_empty'=>false]);
+            global $wpdb; $tk = self::table_keywords();
+
+            $pairs = [];
+            foreach ($langs as $lang){
+                foreach ($terms as $t){
+                    $tid_lang = self::translate_term_id((int)$t->term_id, $lang);
+                    $cnt = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$tk} WHERE term_id=%d AND lang=%s", $tid_lang, $lang));
+                    if ($cnt < $target){ $pairs[] = ['term_id'=>$tid_lang,'lang'=>$lang,'count'=>$cnt]; }
+                }
+            }
+            self::pipeline_log('topup','start', null, null, ['candidates'=>count($pairs),'target'=>$target]);
+            $processed = 0;
+            foreach ($pairs as $p){
+                if ($processed >= $maxPairs) break;
+                $term_id = (int)$p['term_id']; $lang = (string)$p['lang']; $cnt = (int)$p['count'];
+                self::pipeline_log('topup','pair', $term_id, $lang, ['count'=>$cnt,'target'=>$target]);
+                // Run full follow‑ups + Smart Fill path (includes Related live, Intent live, Volume async, PAA)
+                self::enqueue_followups_for_term_lang($term_id, $lang);
+                $processed++;
+            }
+            // Ensure any aggregated batches are posted now
+            self::agg_flush_all($auth);
+            self::pipeline_log('topup','done', null, null, ['processed'=>$processed,'candidates'=>count($pairs)]);
+        } catch (\Throwable $e) {
+            self::log_write('error','topup crashed', ['endpoint'=>'ds-topup','action'=>'crash','error'=>$e->getMessage()]);
+        } finally {
+            delete_transient($lock_key);
+        }
+    }
+
     public static function schedule_as_events(){
         if (!function_exists('as_next_scheduled_action') || !function_exists('as_schedule_recurring_action')) {
             return; // Action Scheduler not available
@@ -2247,6 +2305,13 @@ final class DS_Keywords {
             $eight_am  = strtotime('tomorrow 08:00:00') - DAY_IN_SECONDS; // today 08:00 approx
             $start     = max(time()+600, $eight_am + $tz_offset);
             as_schedule_recurring_action($start, DAY_IN_SECONDS, self::AS_REPORT, [], 'ds-keywords');
+        }
+        // Schedule daily Top‑Up driver (~09:00 site time)
+        if (!as_next_scheduled_action(self::AS_TOPUP, [], 'ds-keywords')) {
+            $tz_offset = (int) (get_option('gmt_offset', 0) * HOUR_IN_SECONDS);
+            $nine_am   = strtotime('tomorrow 09:00:00') - DAY_IN_SECONDS; // today 09:00 approx
+            $start2    = max(time()+900, $nine_am + $tz_offset);
+            as_schedule_recurring_action($start2, DAY_IN_SECONDS, self::AS_TOPUP, [], 'ds-keywords');
         }
         // Clear WP-Cron duplicates if any
         if (function_exists('wp_next_scheduled')) {
@@ -2583,7 +2648,35 @@ final class DS_Keywords {
                 self::log_write('info','autofix: set related_mode=live', ['endpoint'=>'ds-autofix','action'=>'related_mode_live']);
             }
         }
+        // If there has been no endpoint activity in last 24h, or intent coverage is very low for any language,
+        // automatically schedule a Top‑Up run once per ~20 hours.
+        $hadActivity = false;
+        if (is_array($report['endpoints'] ?? null)){
+            foreach ($report['endpoints'] as $ep=>$m){
+                if ($ep === 'ds-poll') continue;
+                $post = (int)($m['post_tasks'] ?? 0);
+                $ing  = (int)($m['handle_result'] ?? 0);
+                if (($post + $ing) > 0) { $hadActivity = true; break; }
+            }
+        }
+        $lowIntent = false;
+        if (is_array($report['coverage'] ?? null)){
+            foreach ($report['coverage'] as $row){
+                $pct = (float)($row['intent_covered_pct'] ?? 0.0);
+                $kwc = (int)($row['keywords'] ?? 0);
+                if ($kwc > 0 && $pct < 5.0) { $lowIntent = true; break; }
+            }
+        }
+        $now = time();
+        $last = (int) get_option('ds_kw_last_topup_unix', 0);
+        $cooldown = 20 * HOUR_IN_SECONDS;
+        if ((!$hadActivity || $lowIntent) && ($now - $last) > $cooldown){
+            if (function_exists('as_enqueue_async_action')){
+                as_enqueue_async_action(self::AS_TOPUP, [], 'ds-keywords');
+                update_option('ds_kw_last_topup_unix', $now);
+                self::log_write('info','autofix: topup scheduled', ['endpoint'=>'ds-autofix','action'=>'topup_scheduled','response'=>['reason'=> !$hadActivity ? 'no_activity_24h' : 'low_intent_coverage']]);
+            }
+        }
         // For heavy queue backlog + very high poll throttle, only suggest (do not auto change limits)
-        // Actions taken are logged above.
     }
 }
