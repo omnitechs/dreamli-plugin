@@ -28,6 +28,8 @@ final class DS_AI_Product_SEO {
 
     // Runner selection
     const OPT_RUNNER            = 'ds_ai_runner';  // 'as' (Action Scheduler) or 'direct' (Direct + WP-Cron)
+    // Multi-language orchestration toggle
+    const OPT_MULTILANG         = 'ds_ai_multi_language'; // yes/no
 
     // Responses API specific
     const OPT_PROMPT_ID         = 'ds_ai_prompt_id';
@@ -151,6 +153,10 @@ final class DS_AI_Product_SEO {
         register_setting('ds_ai_generator', self::OPT_RUNNER, [
             'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'as'
         ]);
+        // Multi-language orchestration toggle (default off)
+        register_setting('ds_ai_generator', self::OPT_MULTILANG, [
+            'type'=>'string','sanitize_callback'=>'sanitize_text_field','default'=>'no'
+        ]);
     }
     public static function render_settings(){
         if (!current_user_can('manage_options')) return;
@@ -158,6 +164,7 @@ final class DS_AI_Product_SEO {
         <div class="wrap">
             <h1>DS AI Product Generator</h1>
             <form method="post" action="options.php">
+                <?php if (isset($_POST[self::OPT_MULTILANG])) { update_option(self::OPT_MULTILANG, $_POST[self::OPT_MULTILANG]==='yes'?'yes':'no'); } ?>
                 <?php settings_fields('ds_ai_generator'); ?>
                 <?php do_settings_sections('ds_ai_generator'); ?>
                 <table class="form-table" role="presentation">
@@ -214,6 +221,13 @@ final class DS_AI_Product_SEO {
                                 <option value="direct" <?php selected($runner,'direct'); ?>>Direct + WP‑Cron fallback</option>
                             </select>
                             <p class="description">Recommended: Action Scheduler (visible jobs, concurrency control). If not installed, select Direct + WP‑Cron.</p>
+                        </td>
+                    </tr>
+                    <tr><th>Auto‑generate for all languages</th>
+                        <td>
+                            <?php $ml = get_option(self::OPT_MULTILANG, 'no'); ?>
+                            <label><input type="checkbox" name="<?php echo esc_attr(self::OPT_MULTILANG); ?>" value="yes" <?php checked($ml,'yes'); ?>/> When Queue Generate is clicked, create missing translations and run AI for every language.</label>
+                            <p class="description">Uncheck to run only for the current product/language. You can still override per run using the checkbox in the metabox.</p>
                         </td>
                     </tr>
                 </table>
@@ -285,6 +299,8 @@ final class DS_AI_Product_SEO {
         <p><label><strong>Personal story (optional)</strong></label>
             <textarea id="ds-ai-ovr-story" rows="2" style="width:100%" placeholder="1–3 sentences for human touch"><?php echo esc_textarea($ovr_story); ?></textarea>
         </p>
+        <?php $ml_default = get_option(self::OPT_MULTILANG,'no')==='yes'; ?>
+        <p><label><input type="checkbox" id="ds-ai-all-langs" <?php checked($ml_default,true); ?> /> Run for all languages (create missing translations)</label></p>
 
         <button type="button" class="button button-primary" id="ds-ai-run" <?php disabled(!$has_cat || !$has_img, true); ?>>Queue Generate</button>
 
@@ -302,6 +318,7 @@ final class DS_AI_Product_SEO {
             const ext  = $('#ds-ai-external-link');
             const kws  = $('#ds-ai-ovr-kws');
             const story= $('#ds-ai-ovr-story');
+            const allLangs = $('#ds-ai-all-langs');
             const postId = <?php echo (int)$post->ID; ?>;
             const nonce = '<?php echo esc_js(wp_create_nonce(self::NONCE)); ?>';
             let pollTimer = null, last = 0, currentRunId = null;
@@ -343,6 +360,7 @@ final class DS_AI_Product_SEO {
                     fd.append('external_link', ext.value);
                     fd.append('ovr_kws', kws.value);
                     fd.append('ovr_story', story.value);
+                    if (allLangs) { fd.append('all_langs', allLangs.checked ? '1' : '0'); }
 
                     if (pollTimer) clearInterval(pollTimer);
                     pollTimer = setInterval(poll, 2500);
@@ -408,8 +426,12 @@ final class DS_AI_Product_SEO {
         self::log_start($run_id);
         self::log($run_id, date('H:i:s') . " — Queueing op={$op} model={$model} post_id={$post_id}");
 
-        // If Polylang is active, orchestrate for all languages (create missing translations and queue runs)
-        if (function_exists('pll_languages_list') && function_exists('pll_get_post_language')) {
+        // Multi-language gating: only orchestrate when explicitly requested or enabled in settings
+        $all_langs_req = isset($_POST['all_langs']) ? (($_POST['all_langs'] === '1') || ($_POST['all_langs'] === 'yes')) : null;
+        $ml_enabled    = (string) get_option(self::OPT_MULTILANG, 'no') === 'yes';
+        $do_multilang  = ($all_langs_req === true) || ($all_langs_req === null && $ml_enabled);
+        if ($do_multilang && function_exists('pll_languages_list') && function_exists('pll_get_post_language')) {
+            // Orchestrate for all languages (create missing translations and queue runs)
             $summary = self::generate_all_languages($post_id, $model, $op, $run_id);
             $msg = 'Queued '.$summary['scheduled'].' runs across languages: '.implode(', ', $summary['langs']);
             self::json_success(['msg'=>$msg, 'details'=>$summary]);
@@ -480,6 +502,8 @@ final class DS_AI_Product_SEO {
             // Generate unique run_id for each job; log into parent log
             $rid = 'r'.dechex(time()).substr(md5($lang.$pid.microtime(true)),0,6);
             self::log($parent_run_id, 'Scheduling ['.$lang."] post_id=".$pid.' run_id='.$rid);
+            // Save reverse lookup so child logs can be mirrored to parent
+            set_transient(self::child_meta_key($rid), ['lang'=>$lang,'parent'=>$parent_run_id,'post_id'=>$pid], 2*DAY_IN_SECONDS);
             $args = ['post_id'=>$pid,'model'=>$model,'op'=>$op,'run_id'=>$rid];
             if ($runner === 'as' && function_exists('as_enqueue_async_action')) {
                 try {
@@ -499,7 +523,11 @@ final class DS_AI_Product_SEO {
             $runs[] = ['lang'=>$lang,'post_id'=>$pid,'run_id'=>$rid];
         }
 
+        // Persist parent→children mapping for aggregated progress logs
+        set_transient(self::children_key($parent_run_id), $runs, 2*DAY_IN_SECONDS);
         self::log($parent_run_id, 'Summary: created='.$created.' translations; scheduled='.$scheduled.' runs.');
+        // Emit initial aggregated progress line
+        self::update_parent_progress($parent_run_id);
         return ['created'=>$created,'scheduled'=>$scheduled,'langs'=>array_keys($translations),'runs'=>$runs];
     }
 
@@ -545,6 +573,8 @@ final class DS_AI_Product_SEO {
             if (in_array($k, $skip_keys, true)) continue;
             // Avoid duplicating gallery (already set)
             if ($k === '_product_image_gallery') continue;
+            // Skip ACF product FAQ meta to prevent cross-language duplication
+            if ($k === 'product_faq' || $k === '_product_faq' || strpos($k, 'product_faq_') === 0 || strpos($k, '_product_faq_') === 0) continue;
             foreach ($vals as $v){
                 // Update multiple values if array
                 update_post_meta($new_id, $k, maybe_unserialize($v));
@@ -686,6 +716,7 @@ final class DS_AI_Product_SEO {
                 'product_name'      => $post->post_title,
                 'keywords'          => $ctx['keywords'],
                 'keywords_detailed' => $ctx['keywords_detailed'],
+                'category_url'      => $ctx['category_url'],
                 'faq'               => $ctx['faq'],
             ]
         ];
@@ -763,6 +794,10 @@ final class DS_AI_Product_SEO {
         $img_count = 0; $img_preview = [];
         foreach ($img_urls_for_payload as $iu) { $img_count++; if (count($img_preview)<2) { $img_preview[] = $iu; } }
         self::log($run_id, 'Input images sent: '. $img_count . ( $img_count ? (' [e.g., '.implode(', ', array_map(function($s){ return (strlen($s)>120?substr($s,0,117).'...':$s); }, $img_preview)).']') : '' ) );
+
+        // Minimal schema note to satisfy text.format=json_object requirements in Prompt mode
+        $schema_note = 'Output must be a JSON object only. Keys: title, meta_title, meta_description, focus_keywords (array of strings), slug, short_description, long_description_html, faq (array of {question, answer}), image_alt_text. No prose.';
+        $content_blocks[] = ['type'=>'input_text', 'text'=> $schema_note];
 
         $input = [[ 'role'=>'user', 'content'=> $content_blocks ]];
 
@@ -1473,15 +1508,22 @@ final class DS_AI_Product_SEO {
             'run_id' => $run_id,
             'sig'    => $sig,
         ];
+        // More reliable fire-and-forget on some hosts: allow a small connection window and relax SSL for localhost
+        $host = wp_parse_url($url, PHP_URL_HOST);
+        $is_local = in_array($host, ['localhost','127.0.0.1'], true) || (is_string($host) && substr($host, -6) === '.local');
         $resp = wp_remote_post($url, [
-            'timeout'     => 0.01,
+            'timeout'     => 2,          // was 0.01 — too aggressive for some stacks (connection never established)
             'blocking'    => false,
-            'sslverify'   => true,
+            'sslverify'   => $is_local ? false : true,
             'body'        => $body,
             'redirection' => 0,
             'headers'     => ['Expect' => '']
         ]);
-        self::log($run_id, 'Spawned direct async worker (no WP-Cron).');
+        if (is_wp_error($resp)) {
+            self::log($run_id, 'Direct spawn http error: ' . $resp->get_error_message());
+        } else {
+            self::log($run_id, 'Spawned direct async worker (no WP-Cron).');
+        }
     }
 
     /* ===================== Fallback & duplicate-run guard ===================== */
@@ -1531,8 +1573,12 @@ final class DS_AI_Product_SEO {
     /* ===================== Logging (transient) ===================== */
     public static function debug_log($run_id, $msg){ self::log($run_id,$msg); }
     private static function log_key($run_id){ return 'ds_ai_log_'.$run_id; }
+    private static function children_key($parent_run_id){ return 'ds_ai_children_'.$parent_run_id; }
+    private static function child_meta_key($child_run_id){ return 'ds_ai_child_'.$child_run_id; }
     private static function log_start($run_id){ if(!$run_id) return; set_transient(self::log_key($run_id), [], 30*MINUTE_IN_SECONDS); }
-    private static function log($run_id,$msg){
+
+    // Append a line to a specific run's log without any mirroring
+    private static function append_log($run_id, $msg){
         if(!$run_id) return;
         $key = self::log_key($run_id);
         $arr = get_transient($key);
@@ -1540,6 +1586,58 @@ final class DS_AI_Product_SEO {
         $arr[] = $msg;
         set_transient($key, $arr, 30*MINUTE_IN_SECONDS);
     }
+
+    // Public logging entry: write to this run, and if it is a child, mirror to parent with [lang] prefix
+    private static function log($run_id,$msg){
+        if(!$run_id) return;
+        // Always write to the current run
+        self::append_log($run_id, $msg);
+        // If this run is a child of a parent multi-language orchestration, mirror line to the parent
+        $meta = get_transient(self::child_meta_key($run_id));
+        if (is_array($meta) && !empty($meta['parent'])){
+            $parent = (string)$meta['parent'];
+            $lang   = isset($meta['lang']) ? (string)$meta['lang'] : '';
+            $pmsg = ($lang!=='' ? ('['.$lang.'] ') : '') . $msg;
+            self::append_log($parent, $pmsg);
+        }
+    }
+
+    // Compute and log an aggregated progress line into the parent run log
+    private static function update_parent_progress($parent_run_id){
+        if (!$parent_run_id) return;
+        $children = get_transient(self::children_key($parent_run_id));
+        if (!is_array($children) || empty($children)) return;
+        $total = count($children);
+        $counts = ['completed'=>0,'failed'=>0,'in_progress'=>0,'queued'=>0,'pending'=>0];
+        $next_lang = '';
+        $next_ts = null;
+        foreach ($children as $ch){
+            $rid = isset($ch['run_id']) ? (string)$ch['run_id'] : '';
+            $lang= isset($ch['lang']) ? (string)$ch['lang'] : '';
+            if ($rid===''){ $counts['pending']++; continue; }
+            $job = self::job_get($rid);
+            if (!$job){ $counts['pending']++; continue; }
+            $st = (string)$job['status'];
+            if ($st==='completed') $counts['completed']++;
+            elseif ($st==='failed' || $st==='cancelled' || $st==='expired') $counts['failed']++;
+            elseif ($st==='in_progress') $counts['in_progress']++;
+            elseif ($st==='queued') $counts['queued']++;
+            else $counts['queued']++;
+            $npa = isset($job['next_poll_at']) ? (string)$job['next_poll_at'] : '';
+            if ($npa!==''){
+                $ts = strtotime($npa.' UTC'); // stored in GMT
+                if ($ts && ($next_ts===null || $ts < $next_ts)) { $next_ts=$ts; $next_lang=$lang; }
+            }
+        }
+        $ready = $counts['completed'];
+        $line = sprintf(
+            'Progress: ready=%d/%d; in_progress=%d; queued=%d; failed=%d; pending=%d%s',
+            $ready, $total, $counts['in_progress'], $counts['queued'], $counts['failed'], $counts['pending'],
+            ($next_ts? ('; next fetch ['.$next_lang.'] at '.date('H:i:s',$next_ts)) : '')
+        );
+        self::append_log($parent_run_id, $line);
+    }
+
     private static function json_success($data=[]){ header('Content-Type: application/json; charset=utf-8'); echo wp_json_encode(['success'=>true,'data'=>$data]); wp_die(); }
     private static function json_error($message,$code=400){ status_header((int)$code); header('Content-Type: application/json; charset=utf-8'); echo wp_json_encode(['success'=>false,'message'=>$message,'code'=>(int)$code]); wp_die(); }
 
@@ -1649,6 +1747,7 @@ final class DS_AI_Product_SEO {
                 'product_name'      => $post->post_title,
                 'keywords'          => $ctx['keywords'],
                 'keywords_detailed' => $ctx['keywords_detailed'],
+                'category_url'      => $ctx['category_url'],
                 'faq'               => $ctx['faq'],
             ]
         ];
@@ -1682,7 +1781,7 @@ final class DS_AI_Product_SEO {
                . 'Example JSON: {"title":"...","short_description":"...","long_description_html":"<h2>...</h2><p>...</p>","meta_title":"...","meta_description":"...","focus_keywords":["...","..."],"slug":"...","faq":[{"question":"...","answer":"..."}]}\n\n'
                . 'FINAL OUTPUT MUST BE VALID JSON ONLY.';
 
-        // Build Responses API payload (Prompt mode)
+        // Build Responses API payload (Prompt or Model mode)
         $prompt_id      = trim((string)get_option(self::OPT_PROMPT_ID,''));
         $prompt_version = trim((string)get_option(self::OPT_PROMPT_VERSION,'4'));
         $vs_csv         = (string)get_option(self::OPT_VECTOR_STORE_IDS,'');
@@ -1699,6 +1798,9 @@ final class DS_AI_Product_SEO {
         foreach ($img_urls_for_payload as $u) { $content_blocks[] = ['type'=>'input_image','image_url'=>$u]; }
         $img_count = count($img_urls_for_payload); $img_preview = array_slice($img_urls_for_payload,0,2);
         self::log($run_id, 'Input images sent: '. $img_count . ( $img_count ? (' [e.g., '.implode(', ', array_map(function($s){ return (strlen($s)>120?substr($s,0,117).'...':$s); }, $img_preview)).']') : '' ) );
+        // Minimal schema note to satisfy text.format=json_object requirements in Prompt mode
+        $schema_note = 'Output must be a JSON object only. Keys: title, meta_title, meta_description, focus_keywords (array of strings), slug, short_description, long_description_html, faq (array of {question, answer}), image_alt_text. No prose.';
+        $content_blocks[] = ['type'=>'input_text','text'=>$schema_note];
         $input = [[ 'role'=>'user', 'content'=> $content_blocks ]];
 
         $tools = [];
@@ -1711,15 +1813,31 @@ final class DS_AI_Product_SEO {
 //            ];
 //        }
 
-        $payload = [
-            'prompt'    => ['id'=>$prompt_id,'version'=>$prompt_version?:'4'],
-            'input'     => $input,
-            'reasoning' => [ 'summary'=>'auto' ],
-            'tools'     => $tools,
-            'store'     => $store_resp,
-            'include'   => $include_fields,
-            'background'=> true,
-        ];
+        if ($prompt_id !== '') {
+            $payload = [
+                'prompt'    => ['id'=>$prompt_id,'version'=>$prompt_version?:'4'],
+                'input'     => $input,
+                'reasoning' => [ 'summary'=>'auto' ],
+                'tools'     => $tools,
+                'store'     => $store_resp,
+                'include'   => $include_fields,
+                'background'=> true,
+            ];
+            self::log($run_id, 'Responses payload (prompt mode) with constructed input blocks (images+keywords).');
+        } else {
+            // Fallback to model mode like worker()
+            $payload = [
+                'model'     => $model,
+                'instructions' => trim($system) . "\n\n" . trim($gen),
+                'input'     => $input,
+                'reasoning' => [ 'summary'=>'auto' ],
+                'tools'     => $tools,
+                'store'     => $store_resp,
+                'include'   => $include_fields,
+                'background'=> true,
+            ];
+            self::log($run_id, 'Responses payload (model mode) with constructed input blocks (compact user payload).');
+        }
 
         self::log($run_id,'Creating async OpenAI response (background=true)…');
         $api_key = self::get_api_key();
@@ -1755,6 +1873,9 @@ final class DS_AI_Product_SEO {
         self::job_insert($row);
         self::log($run_id, 'Created async response id='.$response_id.' status='.$status.'; first poll in 10s');
         self::schedule_poll($run_id, 10);
+        // If this run is part of a multi-language batch, update parent aggregated progress now
+        $meta = get_transient(self::child_meta_key($run_id));
+        if (is_array($meta) && !empty($meta['parent'])) { self::update_parent_progress((string)$meta['parent']); }
     }
 
     public static function poll_job($args){
@@ -1775,6 +1896,9 @@ final class DS_AI_Product_SEO {
             self::job_update($run_id, [ 'attempts' => (int)$job['attempts']+1, 'last_polled_at'=>$now, 'updated_at'=>$now, 'next_poll_at'=>gmdate('Y-m-d H:i:s', time()+10) ]);
             self::release_lease($run_id, $owner);
             self::schedule_poll($run_id, 10);
+            // Update parent aggregate progress if part of a multi-language run
+            $meta = get_transient(self::child_meta_key($run_id));
+            if (is_array($meta) && !empty($meta['parent'])) { self::update_parent_progress((string)$meta['parent']); }
             return;
         }
         $status = (string)($resp['status'] ?? 'queued');
@@ -1885,6 +2009,9 @@ final class DS_AI_Product_SEO {
             self::release_lease($run_id, $owner);
             self::mark_done($run_id);
             self::log($run_id,'Worker done');
+            // Update parent aggregate progress if part of a multi-language run
+            $meta = get_transient(self::child_meta_key($run_id));
+            if (is_array($meta) && !empty($meta['parent'])) { self::update_parent_progress((string)$meta['parent']); }
             return;
         }
 
@@ -1894,6 +2021,9 @@ final class DS_AI_Product_SEO {
             self::release_lease($run_id, $owner);
             self::log($run_id, 'Poll #'. $attempts .' status='.$status.'; next in 10s');
             self::schedule_poll($run_id, 10);
+            // Update parent aggregate progress if part of a multi-language run
+            $meta = get_transient(self::child_meta_key($run_id));
+            if (is_array($meta) && !empty($meta['parent'])) { self::update_parent_progress((string)$meta['parent']); }
             return;
         }
 
@@ -1901,6 +2031,9 @@ final class DS_AI_Product_SEO {
         self::job_update($run_id, ['status'=>$status, 'updated_at'=>$now]);
         self::release_lease($run_id, $owner);
         self::log($run_id, 'Terminal status: '.$status);
+        // Update parent aggregate progress if part of a multi-language run
+        $meta = get_transient(self::child_meta_key($run_id));
+        if (is_array($meta) && !empty($meta['parent'])) { self::update_parent_progress((string)$meta['parent']); }
     }
 
     private static function openai_create_async($api_key, $payload, $run_id=''){
